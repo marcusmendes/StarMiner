@@ -15,6 +15,7 @@
 #include "utils.h"
 #include "esp_timer.h"
 #include "esp_heap_caps.h"
+#include "esp_psram.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -95,7 +96,9 @@ void STRATUM_V1_initialize_buffer()
     // Free any existing buffer (may be non-NULL if a previous V1 task was running)
     free(json_rpc_buffer);
 
-    json_rpc_buffer = malloc(BUFFER_SIZE);
+    json_rpc_buffer = esp_psram_is_initialized()
+        ? heap_caps_malloc(BUFFER_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
+        : malloc(BUFFER_SIZE);
     json_rpc_buffer_size = BUFFER_SIZE;
     if (json_rpc_buffer == NULL) {
         printf("Error: Failed to allocate memory for buffer\n");
@@ -104,7 +107,9 @@ void STRATUM_V1_initialize_buffer()
     memset(json_rpc_buffer, 0, BUFFER_SIZE);
 
     if (request_timings == NULL) {
-        request_timings = heap_caps_malloc(sizeof(RequestTiming) * MAX_REQUEST_IDS, MALLOC_CAP_SPIRAM);
+        request_timings = esp_psram_is_initialized()
+            ? heap_caps_malloc(sizeof(RequestTiming) * MAX_REQUEST_IDS, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
+            : malloc(sizeof(RequestTiming) * MAX_REQUEST_IDS);
         if (request_timings == NULL) {
             printf("Error: Failed to allocate memory for request_timings\n");
             exit(1);
@@ -139,7 +144,9 @@ static void realloc_json_buffer(size_t len)
     }
 
     new = new + (BUFFER_SIZE - (new % BUFFER_SIZE));
-    void * new_sockbuf = realloc(json_rpc_buffer, new);
+    void * new_sockbuf = esp_psram_is_initialized()
+        ? heap_caps_realloc(json_rpc_buffer, new, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
+        : realloc(json_rpc_buffer, new);
 
     if (new_sockbuf == NULL) {
         fprintf(stderr, "Error: realloc failed in recalloc_sock()\n");
@@ -277,7 +284,9 @@ static bool parse_mining_notify(cJSON *json, StratumApiV1Message *message)
         return false;
     }
 
-    mining_notify *new_work = calloc(1, sizeof(mining_notify));
+    mining_notify *new_work = esp_psram_is_initialized()
+        ? heap_caps_calloc(1, sizeof(mining_notify), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
+        : calloc(1, sizeof(mining_notify));
     if (!new_work) {
         ESP_LOGE(TAG, "Memory allocation failed for mining_notify");
         return false;
@@ -290,34 +299,43 @@ static bool parse_mining_notify(cJSON *json, StratumApiV1Message *message)
         return false;
     }
 
-    new_work->job_id = strdup(job_id_item->valuestring);
-    new_work->prev_block_hash = strdup(cJSON_GetArrayItem(params, 1)->valuestring);
-    new_work->coinbase_1 = strdup(cJSON_GetArrayItem(params, 2)->valuestring);
-    new_work->coinbase_2 = strdup(cJSON_GetArrayItem(params, 3)->valuestring);
+    new_work->job_id = strdup_psram(job_id_item->valuestring);
+    new_work->prev_block_hash = strdup_psram(cJSON_GetArrayItem(params, 1)->valuestring);
+    new_work->coinbase_1 = strdup_psram(cJSON_GetArrayItem(params, 2)->valuestring);
+    new_work->coinbase_2 = strdup_psram(cJSON_GetArrayItem(params, 3)->valuestring);
+    if (!new_work->job_id || !new_work->prev_block_hash || !new_work->coinbase_1 || !new_work->coinbase_2) {
+        ESP_LOGE(TAG, "Memory allocation failed for mining_notify fields");
+        STRATUM_V1_free_mining_notify(new_work);
+        return false;
+    }
 
     cJSON *merkle_branch = cJSON_GetArrayItem(params, 4);
     if (!merkle_branch || !cJSON_IsArray(merkle_branch)) {
         ESP_LOGE(TAG, "Invalid merkle_branch in mining.notify");
-        free(new_work->job_id);
-        free(new_work->prev_block_hash);
-        free(new_work->coinbase_1);
-        free(new_work->coinbase_2);
-        free(new_work);
+        STRATUM_V1_free_mining_notify(new_work);
         return false;
     }
     new_work->n_merkle_branches = cJSON_GetArraySize(merkle_branch);
     if (new_work->n_merkle_branches > MAX_MERKLE_BRANCHES) {
         ESP_LOGE(TAG, "Too many Merkle branches: %zu", new_work->n_merkle_branches);
-        free(new_work->job_id);
-        free(new_work->prev_block_hash);
-        free(new_work->coinbase_1);
-        free(new_work->coinbase_2);
-        free(new_work);
+        STRATUM_V1_free_mining_notify(new_work);
         return false;
     }
-    new_work->merkle_branches = malloc(HASH_SIZE * new_work->n_merkle_branches);
-    for (size_t i = 0; i < new_work->n_merkle_branches; i++) {
-        hex2bin(cJSON_GetArrayItem(merkle_branch, i)->valuestring, new_work->merkle_branches + HASH_SIZE * i, HASH_SIZE);
+    if (new_work->n_merkle_branches > 0) {
+        size_t branches_size = HASH_SIZE * new_work->n_merkle_branches;
+        new_work->merkle_branches = esp_psram_is_initialized()
+            ? heap_caps_malloc(branches_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
+            : malloc(branches_size);
+        if (!new_work->merkle_branches) {
+            ESP_LOGE(TAG, "Memory allocation failed for merkle_branches");
+            STRATUM_V1_free_mining_notify(new_work);
+            return false;
+        }
+        for (size_t i = 0; i < new_work->n_merkle_branches; i++) {
+            hex2bin(cJSON_GetArrayItem(merkle_branch, i)->valuestring, new_work->merkle_branches + HASH_SIZE * i, HASH_SIZE);
+        }
+    } else {
+        new_work->merkle_branches = NULL;
     }
 
     new_work->version = strtoul(cJSON_GetArrayItem(params, 5)->valuestring, NULL, 16);

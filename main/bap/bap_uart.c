@@ -11,6 +11,8 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "driver/uart.h"
+#include "esp_heap_caps.h"
+#include "esp_psram.h"
 #include "esp_log.h"
 #include "esp_err.h"
 #include "device_config.h"
@@ -114,8 +116,14 @@ void BAP_send_ap_message(GlobalState *state) {
 }
 
 
+static inline UBaseType_t bap_stack_caps(void) {
+    return esp_psram_is_initialized() ? (MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) : MALLOC_CAP_DEFAULT;
+}
+
 static void uart_receive_task(void *pvParameters) {
-    uint8_t *data = (uint8_t *) malloc(BAP_BUF_SIZE);
+    uint8_t *data = (uint8_t *)(esp_psram_is_initialized()
+        ? heap_caps_malloc(BAP_BUF_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
+        : malloc(BAP_BUF_SIZE));
     if (!data) {
         ESP_LOGE(TAG, "Failed to allocate memory for UART receive buffer");
         vTaskDelete(NULL);
@@ -210,15 +218,21 @@ static void uart_send_task(void *pvParameters) {
 }
 
 esp_err_t BAP_start_uart_receive_task(void) {
-    xTaskCreateWithCaps(
+    BaseType_t task_result = xTaskCreatePinnedToCoreWithCaps(
         uart_receive_task,
         "uart_receive_ta",
         8192,
         NULL,
         5,
         &uart_receive_task_handle,
-        MALLOC_CAP_SPIRAM
+        0,
+        bap_stack_caps()
     );
+
+    if (task_result != pdPASS) {
+        ESP_LOGE(TAG, "Failed to create uart_receive_task");
+        return ESP_ERR_NO_MEM;
+    }
 
     //ESP_LOGI(TAG, "UART receive task started");
     return ESP_OK;
@@ -260,14 +274,15 @@ esp_err_t BAP_uart_init(void) {
     }
     
     
-    BaseType_t task_result = xTaskCreateWithCaps(
+    BaseType_t task_result = xTaskCreatePinnedToCoreWithCaps(
         uart_send_task,
         "uart_send_task",
         8192,
         NULL,
         5,
         &uart_send_task_handle,
-        MALLOC_CAP_SPIRAM
+        0,
+        bap_stack_caps()
     );
     
     if (task_result != pdPASS) {

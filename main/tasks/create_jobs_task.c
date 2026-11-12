@@ -12,6 +12,7 @@
 #include "asic.h"
 #include "system.h"
 #include "esp_heap_caps.h"
+#include "esp_psram.h"
 #include "sv2_protocol.h"
 #include "stratum_api.h"
 #include "stratum_v2_task.h"
@@ -25,6 +26,14 @@ static const char *TAG = "create_jobs_task";
 static void generate_work(GlobalState *GLOBAL_STATE, mining_notify *notification, uint64_t extranonce_2, double difficulty);
 static void generate_work_sv2(GlobalState *GLOBAL_STATE, sv2_job_t *job, double difficulty);
 static void generate_work_sv2_ext(GlobalState *GLOBAL_STATE, sv2_ext_job_t *job, double difficulty, uint64_t extranonce_2_counter);
+
+static inline bm_job *alloc_bm_job(void)
+{
+    if (esp_psram_is_initialized()) {
+        return heap_caps_malloc(sizeof(bm_job), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    }
+    return malloc(sizeof(bm_job));
+}
 
 // Free a work item using the correct free function for the protocol it was created under
 static void free_work_item(GlobalState *GLOBAL_STATE, void *work, stratum_protocol_t protocol)
@@ -46,8 +55,9 @@ void create_jobs_task(void *pvParameters)
     GlobalState *GLOBAL_STATE = (GlobalState *)pvParameters;
 
     // Initialize ASIC task module (moved from ASIC_task)
-    GLOBAL_STATE->ASIC_TASK_MODULE.active_jobs = heap_caps_malloc(sizeof(bm_job *) * 128, MALLOC_CAP_SPIRAM);
-    GLOBAL_STATE->valid_jobs = heap_caps_malloc(sizeof(uint8_t) * 128, MALLOC_CAP_SPIRAM);
+    uint32_t job_table_caps = esp_psram_is_initialized() ? (MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) : MALLOC_CAP_DEFAULT;
+    GLOBAL_STATE->ASIC_TASK_MODULE.active_jobs = heap_caps_malloc(sizeof(bm_job *) * 128, job_table_caps);
+    GLOBAL_STATE->valid_jobs = heap_caps_malloc(sizeof(uint8_t) * 128, job_table_caps);
     for (int i = 0; i < 128; i++) {
         GLOBAL_STATE->ASIC_TASK_MODULE.active_jobs[i] = NULL;
         GLOBAL_STATE->valid_jobs[i] = 0;
@@ -203,7 +213,7 @@ static void generate_work(GlobalState *GLOBAL_STATE, mining_notify *notification
     uint8_t merkle_root[32];
     calculate_merkle_root_hash(coinbase_tx_hash, (uint8_t(*)[32])notification->merkle_branches, notification->n_merkle_branches, merkle_root);
 
-    bm_job *next_job = malloc(sizeof(bm_job));
+    bm_job *next_job = alloc_bm_job();
 
     if (next_job == NULL) {
         ESP_LOGE(TAG, "Failed to allocate memory for new job");
@@ -212,9 +222,14 @@ static void generate_work(GlobalState *GLOBAL_STATE, mining_notify *notification
 
     construct_bm_job(notification, merkle_root, GLOBAL_STATE->version_mask, difficulty, next_job);
 
-    next_job->extranonce2 = strdup(extranonce_2_str);
-    next_job->jobid = strdup(notification->job_id);
+    next_job->extranonce2 = strdup_psram(extranonce_2_str);
+    next_job->jobid = strdup_psram(notification->job_id);
     next_job->version_mask = GLOBAL_STATE->version_mask;
+    if (next_job->extranonce2 == NULL || next_job->jobid == NULL) {
+        ESP_LOGE(TAG, "Failed to allocate memory for job metadata");
+        free_bm_job(next_job);
+        return;
+    }
 
     // Check if ASIC is initialized before trying to send work
     if (!GLOBAL_STATE->ASIC_initalized) {
@@ -235,7 +250,7 @@ static void generate_work(GlobalState *GLOBAL_STATE, mining_notify *notification
 // version bits using version_mask, giving different midstates per nonce search space.
 static void generate_work_sv2(GlobalState *GLOBAL_STATE, sv2_job_t *sv2_job, double difficulty)
 {
-    bm_job *next_job = malloc(sizeof(bm_job));
+    bm_job *next_job = alloc_bm_job();
     if (next_job == NULL) {
         ESP_LOGE(TAG, "Failed to allocate memory for new SV2 job");
         return;
@@ -289,9 +304,14 @@ static void generate_work_sv2(GlobalState *GLOBAL_STATE, sv2_job_t *sv2_job, dou
     // SV2 job metadata
     char jobid_str[16];
     snprintf(jobid_str, sizeof(jobid_str), "%" PRIu32, sv2_job->job_id);
-    next_job->jobid = strdup(jobid_str);
-    next_job->extranonce2 = strdup(""); // unused in SV2 standard
+    next_job->jobid = strdup_psram(jobid_str);
+    next_job->extranonce2 = strdup_psram(""); // unused in SV2 standard
     next_job->version_mask = version_mask;
+    if (next_job->jobid == NULL || next_job->extranonce2 == NULL) {
+        ESP_LOGE(TAG, "Failed to allocate memory for SV2 job metadata");
+        free_bm_job(next_job);
+        return;
+    }
 
     if (!GLOBAL_STATE->ASIC_initalized) {
         ESP_LOGW(TAG, "ASIC not initialized, skipping SV2 job send");
@@ -312,7 +332,7 @@ static void generate_work_sv2_ext(GlobalState *GLOBAL_STATE, sv2_ext_job_t *ext_
     sv2_conn_t *conn = GLOBAL_STATE->sv2_conn;
     if (!conn) return;
 
-    bm_job *next_job = malloc(sizeof(bm_job));
+    bm_job *next_job = alloc_bm_job();
     if (!next_job) {
         ESP_LOGE(TAG, "Failed to allocate memory for SV2 ext job");
         return;
@@ -391,13 +411,18 @@ static void generate_work_sv2_ext(GlobalState *GLOBAL_STATE, sv2_ext_job_t *ext_
     // Job metadata
     char jobid_str[16];
     snprintf(jobid_str, sizeof(jobid_str), "%" PRIu32, ext_job->job_id);
-    next_job->jobid = strdup(jobid_str);
+    next_job->jobid = strdup_psram(jobid_str);
 
     // Store extranonce_2 as hex for share submission
     char en2_hex[65];
     bin2hex(extranonce_2, extranonce_2_len, en2_hex, sizeof(en2_hex));
-    next_job->extranonce2 = strdup(en2_hex);
+    next_job->extranonce2 = strdup_psram(en2_hex);
     next_job->version_mask = version_mask;
+    if (next_job->jobid == NULL || next_job->extranonce2 == NULL) {
+        ESP_LOGE(TAG, "Failed to allocate memory for SV2 ext job metadata");
+        free_bm_job(next_job);
+        return;
+    }
 
     if (!GLOBAL_STATE->ASIC_initalized) {
         ESP_LOGW(TAG, "ASIC not initialized, skipping SV2 ext job send");

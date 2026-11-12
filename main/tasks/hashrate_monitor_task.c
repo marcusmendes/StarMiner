@@ -20,6 +20,10 @@
 #define DIV_10M (HASHRATE_1M_SIZE)
 #define DIV_1H (HASHRATE_10M_SIZE * DIV_10M)
 
+#define WATCHDOG_GRACE_PERIOD_US      (30LL * 1000000LL)
+#define WATCHDOG_ZERO_HASHRATE_US     (60LL * 1000000LL)
+#define WATCHDOG_DOMAIN_FREEZE_US     (45LL * 1000000LL)
+
 static unsigned long poll_count = 0;
 static float hashrate_1m[HASHRATE_1M_SIZE];
 static float hashrate_10m_prev;
@@ -38,6 +42,39 @@ static float sum_hashrates(measurement_t * measurement, int asic_count)
         total += measurement[asic_nr].hashrate;
     }
     return total;
+}
+
+/**
+ * @brief Detect if any ASIC hash domain is frozen (< 10% of the average of the other domains).
+ * Must be called while holding HASHRATE_MONITOR_MODULE->lock.
+ */
+static bool has_frozen_domain(const HashrateMonitorModule * monitor, int asic_count, int hash_domains,
+                              int * out_asic, int * out_domain, float * out_domain_hr, float * out_other_avg)
+{
+    if (hash_domains <= 1) {
+        return false;
+    }
+
+    for (int asic_nr = 0; asic_nr < asic_count; asic_nr++) {
+        float sum = 0.0f;
+        for (int d = 0; d < hash_domains; d++) {
+            sum += monitor->domain_measurements[asic_nr][d].hashrate;
+        }
+
+        for (int d = 0; d < hash_domains; d++) {
+            float d_hr = monitor->domain_measurements[asic_nr][d].hashrate;
+            float other_avg = (sum - d_hr) / (float)(hash_domains - 1);
+            if (other_avg > EPSILON && d_hr < (0.10f * other_avg)) {
+                if (out_asic) *out_asic = asic_nr;
+                if (out_domain) *out_domain = d;
+                if (out_domain_hr) *out_domain_hr = d_hr;
+                if (out_other_avg) *out_other_avg = other_avg;
+                return true;
+            }
+        }
+    }
+
+    return false;
 }
 
 void hashrate_monitor_reset_measurements(void *pvParameters)
@@ -166,9 +203,19 @@ void hashrate_monitor_task(void *pvParameters)
     init_averages();
 
     bool was_asic_initialized = false;
+    bool was_watchdog_armed = false;
+    int64_t asic_init_seen_us = 0;
+    int64_t last_watchdog_check_us = 0;
+    int64_t zero_hashrate_accum_us = 0;
+    int64_t domain_freeze_accum_us = 0;
     TickType_t taskWakeTime = xTaskGetTickCount();
     while (1) {
         bool is_asic_initialized = GLOBAL_STATE->ASIC_initalized;
+        int64_t now_us = esp_timer_get_time();
+
+        if (!was_asic_initialized && is_asic_initialized) {
+            asic_init_seen_us = now_us;
+        }
 
         if (was_asic_initialized && !is_asic_initialized) {
             // ASIC just stopped (pause or overheat): clear measurements so that
@@ -179,6 +226,12 @@ void hashrate_monitor_task(void *pvParameters)
         }
         was_asic_initialized = is_asic_initialized;
 
+        bool any_domain_frozen = false;
+        int frozen_asic = 0;
+        int frozen_domain = 0;
+        float frozen_hr = 0.0f;
+        float frozen_other_avg = 0.0f;
+
         if (is_asic_initialized) {
             ASIC_read_registers(GLOBAL_STATE);
             vTaskDelay(100 / portTICK_PERIOD_MS);
@@ -186,6 +239,8 @@ void hashrate_monitor_task(void *pvParameters)
             pthread_mutex_lock(&HASHRATE_MONITOR_MODULE->lock);
             float current_hashrate = sum_hashrates(HASHRATE_MONITOR_MODULE->total_measurement, asic_count);
             float error_hashrate = sum_hashrates(HASHRATE_MONITOR_MODULE->error_measurement, asic_count);
+            any_domain_frozen = has_frozen_domain(HASHRATE_MONITOR_MODULE, asic_count, hash_domains,
+                                                  &frozen_asic, &frozen_domain, &frozen_hr, &frozen_other_avg);
             pthread_mutex_unlock(&HASHRATE_MONITOR_MODULE->lock);
 
             SYSTEM_MODULE->current_hashrate = current_hashrate;
@@ -194,6 +249,63 @@ void hashrate_monitor_task(void *pvParameters)
             if (current_hashrate > 0.0f) update_hashrate_averages(SYSTEM_MODULE);
         } else {
             SYSTEM_MODULE->current_hashrate = 0;
+        }
+
+        now_us = esp_timer_get_time();
+        int64_t last_freq_change_us = GLOBAL_STATE->POWER_MANAGEMENT_MODULE.last_freq_change_us;
+        bool grace_elapsed = (last_freq_change_us > 0)
+                          && (asic_init_seen_us > 0)
+                          && ((now_us - last_freq_change_us) >= WATCHDOG_GRACE_PERIOD_US)
+                          && ((now_us - asic_init_seen_us) >= WATCHDOG_GRACE_PERIOD_US);
+
+        bool watchdog_armed = is_asic_initialized
+                           && (SYSTEM_MODULE->work_received > 0)
+                           && !SYSTEM_MODULE->pools_unavailable
+                           && !SYSTEM_MODULE->mining_paused
+                           && (SYSTEM_MODULE->overheat_mode == 0)
+                           && (SYSTEM_MODULE->power_fault == 0)
+                           && !SYSTEM_MODULE->hardware_fault
+                           && !GLOBAL_STATE->SELF_TEST_MODULE.is_active
+                           && !GLOBAL_STATE->POWER_MANAGEMENT_MODULE.asic_watchdog_trigger
+                           && grace_elapsed;
+
+        if (!watchdog_armed) {
+            zero_hashrate_accum_us = 0;
+            domain_freeze_accum_us = 0;
+            was_watchdog_armed = false;
+        } else {
+            int64_t dt_us = was_watchdog_armed ? (now_us - last_watchdog_check_us) : 0;
+            last_watchdog_check_us = now_us;
+            was_watchdog_armed = true;
+
+            if (SYSTEM_MODULE->current_hashrate == 0.0f) {
+                zero_hashrate_accum_us += dt_us;
+            } else {
+                zero_hashrate_accum_us = 0;
+            }
+
+            if (any_domain_frozen) {
+                domain_freeze_accum_us += dt_us;
+            } else {
+                domain_freeze_accum_us = 0;
+            }
+
+            if (zero_hashrate_accum_us >= WATCHDOG_ZERO_HASHRATE_US) {
+                ESP_LOGW(TAG, "ASIC Watchdog triggered: total hashrate at 0.0 GH/s for %lld s",
+                         (long long)(zero_hashrate_accum_us / 1000000LL));
+                GLOBAL_STATE->POWER_MANAGEMENT_MODULE.asic_watchdog_trigger = true;
+                zero_hashrate_accum_us = 0;
+                domain_freeze_accum_us = 0;
+                was_watchdog_armed = false;
+            } else if (domain_freeze_accum_us >= WATCHDOG_DOMAIN_FREEZE_US) {
+                ESP_LOGW(TAG, "ASIC Watchdog triggered: ASIC %d domain %d frozen (%.2f GH/s < 10%% of %.2f GH/s avg) for %lld s",
+                         frozen_asic, frozen_domain, frozen_hr, frozen_other_avg,
+                         (long long)(domain_freeze_accum_us / 1000000LL));
+                GLOBAL_STATE->POWER_MANAGEMENT_MODULE.asic_watchdog_trigger = true;
+                zero_hashrate_accum_us = 0;
+                domain_freeze_accum_us = 0;
+                was_watchdog_armed = false;
+            }
         }
 
         vTaskDelayUntil(&taskWakeTime, POLL_RATE / portTICK_PERIOD_MS);

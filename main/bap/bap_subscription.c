@@ -14,6 +14,7 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_heap_caps.h"
+#include "esp_psram.h"
 #include "bap_subscription.h"
 #include "bap_protocol.h"
 #include "bap_uart.h"
@@ -419,21 +420,28 @@ static void mode_management_task(void *pvParameters) {
     vTaskDelete(NULL);
 }
 
+static inline UBaseType_t bap_sub_stack_caps(void) {
+    return esp_psram_is_initialized() ? (MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) : MALLOC_CAP_DEFAULT;
+}
+
 esp_err_t BAP_start_mode_management_task(GlobalState *state) {
     if (!state) {
         ESP_LOGE(TAG, "Invalid global state");
         return ESP_ERR_INVALID_ARG;
     }
     
-    xTaskCreateWithCaps(
-        mode_management_task,
-        "bap_mode_mgmt",
-        8192,
-        state,
-        5,
-        NULL,
-        MALLOC_CAP_SPIRAM
-    );
+    if (xTaskCreatePinnedToCoreWithCaps(
+            mode_management_task,
+            "bap_mode_mgmt",
+            8192,
+            state,
+            5,
+            NULL,
+            0,
+            bap_sub_stack_caps()) != pdPASS) {
+        ESP_LOGE(TAG, "Failed to create bap_mode_mgmt task");
+        return ESP_ERR_NO_MEM;
+    }
 
     //ESP_LOGI(TAG, "BAP mode management task started");
     return ESP_OK;
@@ -445,15 +453,18 @@ esp_err_t BAP_start_subscription_task(GlobalState *state) {
         return ESP_ERR_INVALID_ARG;
     }
     
-    xTaskCreateWithCaps(
-        subscription_update_task,
-        "subscription_up",
-        8192,
-        state,
-        5,
-        &subscription_task_handle,
-        MALLOC_CAP_SPIRAM
-    );
+    if (xTaskCreatePinnedToCoreWithCaps(
+            subscription_update_task,
+            "subscription_up",
+            8192,
+            state,
+            5,
+            &subscription_task_handle,
+            0,
+            bap_sub_stack_caps()) != pdPASS) {
+        ESP_LOGE(TAG, "Failed to create subscription_up task");
+        return ESP_ERR_NO_MEM;
+    }
 
     //ESP_LOGI(TAG, "Subscription update task started");
     return ESP_OK;

@@ -46,7 +46,13 @@ static esp_err_t i2c_transfer_with_retries(i2c_master_dev_handle_t dev_handle,
 
         if (err == ESP_OK) return ESP_OK;
 
-        vTaskDelay(pdMS_TO_TICKS(I2C_RETRY_DELAY_MS));
+        if (i + 1 < I2C_RETRY_COUNT) {
+            esp_err_t reset_err = i2c_master_bus_reset(i2c_bus_handle);
+            if (reset_err != ESP_OK) {
+                ESP_LOGW(TAG, "i2c_master_bus_reset failed: %s", esp_err_to_name(reset_err));
+            }
+            vTaskDelay(pdMS_TO_TICKS(I2C_RETRY_DELAY_MS));
+        }
     }
 
     for (int i = 0; i < i2c_device_count; i++) {

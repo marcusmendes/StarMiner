@@ -276,13 +276,10 @@ void SYSTEM_clean_jobs_queue(GlobalState * GLOBAL_STATE)
     queue_clear(&GLOBAL_STATE->stratum_queue);
 
     pthread_mutex_lock(&GLOBAL_STATE->valid_jobs_lock);
-    for (int i = 0; i < 128; i = i + 4) {
-        GLOBAL_STATE->valid_jobs[i] = 0;
+    if (GLOBAL_STATE->valid_jobs != NULL) {
+        memset(GLOBAL_STATE->valid_jobs, 0, sizeof(uint8_t) * 128);
     }
     pthread_mutex_unlock(&GLOBAL_STATE->valid_jobs_lock);
-
-    // Reset hashrate measurements to prevent a spike on reconnection
-    hashrate_monitor_reset_measurements(GLOBAL_STATE);
 }
 
 void SYSTEM_notify_accepted_share(GlobalState * GLOBAL_STATE)

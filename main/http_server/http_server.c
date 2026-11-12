@@ -5,6 +5,7 @@
 #include <sys/param.h>
 #include <sys/stat.h>
 #include <esp_heap_caps.h>
+#include "esp_psram.h"
 
 #include "esp_err.h"
 #include "freertos/FreeRTOS.h"
@@ -1421,11 +1422,14 @@ esp_err_t start_rest_server(void * pvParameters)
     const char * base_path = "";
 
     REST_CHECK(base_path, "wrong base path", err);
-    rest_server_context_t * rest_context = calloc(1, sizeof(rest_server_context_t));
+    rest_server_context_t * rest_context = esp_psram_is_initialized()
+        ? heap_caps_calloc(1, sizeof(rest_server_context_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
+        : calloc(1, sizeof(rest_server_context_t));
     REST_CHECK(rest_context, "No memory for rest context", err);
     strlcpy(rest_context->base_path, base_path, sizeof(rest_context->base_path));
 
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
+    config.core_id = 0;
     config.uri_match_fn = httpd_uri_match_wildcard;
     config.stack_size = 8192;
     config.max_open_sockets = 20;
@@ -1619,15 +1623,19 @@ esp_err_t start_rest_server(void * pvParameters)
 
     httpd_register_err_handler(server, HTTPD_404_NOT_FOUND, http_404_error_handler);
 
+    UBaseType_t ws_stack_caps = esp_psram_is_initialized()
+        ? (MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
+        : MALLOC_CAP_DEFAULT;
+
     // Start websocket log handler thread
     TaskHandle_t ws_log_task_handle = NULL;
-    if (xTaskCreateWithCaps(websocket_log_task, "ws_log_task", 8192, NULL, 2, &ws_log_task_handle, MALLOC_CAP_SPIRAM) != pdPASS) {
+    if (xTaskCreatePinnedToCoreWithCaps(websocket_log_task, "ws_log_task", 8192, NULL, 2, &ws_log_task_handle, 0, ws_stack_caps) != pdPASS) {
         ESP_LOGE(TAG, "Error creating websocket log task");
     }
     websocket_set_log_task_handle(ws_log_task_handle);
 
     // Start websocket API live data handler thread
-    if (xTaskCreateWithCaps(websocket_api_task, "ws_api_task", 8192, GLOBAL_STATE, 2, NULL, MALLOC_CAP_SPIRAM) != pdPASS) {
+    if (xTaskCreatePinnedToCoreWithCaps(websocket_api_task, "ws_api_task", 8192, GLOBAL_STATE, 2, NULL, 0, ws_stack_caps) != pdPASS) {
         ESP_LOGE(TAG, "Error creating ws api task");
     }
 

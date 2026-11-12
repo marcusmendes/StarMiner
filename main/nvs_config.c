@@ -2,6 +2,7 @@
 #include "sv2_protocol.h"
 #include "global_state.h"
 #include <esp_err.h>
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include <nvs_flash.h>
 #include <nvs.h>
@@ -411,7 +412,7 @@ esp_err_t nvs_config_init(void)
     TaskHandle_t task_handle;
 
     // nvs_task heap _must_ be internal memory
-    BaseType_t task_result = xTaskCreate(nvs_task, "nvs_task", 8192, NULL, 5, &task_handle); 
+    BaseType_t task_result = xTaskCreatePinnedToCoreWithCaps(nvs_task, "nvs_task", 8192, NULL, 5, &task_handle, 0, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     if (task_result != pdPASS) {
         ESP_LOGE(TAG, "Failed to create nvs_task");
 

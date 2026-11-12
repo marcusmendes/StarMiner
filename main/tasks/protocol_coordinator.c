@@ -5,6 +5,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "esp_heap_caps.h"
+#include "esp_psram.h"
 
 #include "protocol_coordinator.h"
 #include "stratum_v1_task.h"
@@ -137,11 +138,16 @@ static bool has_fallback_pool(GlobalState *gs)
             gs->SYSTEM_MODULE.fallback_pool_url[0] != '\0');
 }
 
+static inline UBaseType_t psram_stack_caps(void)
+{
+    return esp_psram_is_initialized() ? (MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) : MALLOC_CAP_DEFAULT;
+}
+
 // Start the V1 stratum task (for primary V1 or fallback)
 static void start_v1_task(GlobalState *gs)
 {
     s_v1_should_shutdown = false;
-    if (xTaskCreateWithCaps(stratum_v1_task, "stratum v1", 8192, (void *)gs, 5, NULL, MALLOC_CAP_SPIRAM) != pdPASS) {
+    if (xTaskCreatePinnedToCoreWithCaps(stratum_v1_task, "stratum v1", 8192, (void *)gs, 5, NULL, 0, psram_stack_caps()) != pdPASS) {
         ESP_LOGE(TAG, "Failed to create V1 stratum task");
     }
 }
@@ -150,7 +156,7 @@ static void start_v1_task(GlobalState *gs)
 static void start_v2_task(GlobalState *gs)
 {
     s_v2_should_shutdown = false;
-    if (xTaskCreateWithCaps(stratum_v2_task, "stratum v2", 12288, (void *)gs, 5, NULL, MALLOC_CAP_SPIRAM) != pdPASS) {
+    if (xTaskCreatePinnedToCoreWithCaps(stratum_v2_task, "stratum v2", 12288, (void *)gs, 5, NULL, 0, psram_stack_caps()) != pdPASS) {
         ESP_LOGE(TAG, "Failed to create V2 stratum task");
     }
 }

@@ -5,6 +5,7 @@
 #include "esp_log.h"
 #include "esp_err.h"
 #include "esp_check.h"
+#include "esp_timer.h"
 
 #include "pmbus_commands.h"
 
@@ -40,6 +41,11 @@ static float last_vin = 0.0f;
 static float last_iout = 0.0f;
 static float last_vout = 0.0f;
 static int last_temp = 0;
+
+#define TPS546_VOUT_CACHE_US 50000LL
+static uint8_t s_vout_mode = 0x97;
+static bool s_vout_mode_cached = false;
+static int64_t s_last_vout_read_us = 0;
 
 
 static esp_err_t TPS546_parse_status(uint16_t);
@@ -281,6 +287,28 @@ static uint16_t float_2_slinear11(float value)
 }
 
 /**
+ * @brief Return the PMBUS_VOUT_MODE exponent (cached from TPS546_init when available)
+ */
+static int get_vout_exponent(void)
+{
+    if (!s_vout_mode_cached) {
+        uint8_t voutmode = s_vout_mode;
+        if (smb_read_byte(PMBUS_VOUT_MODE, &voutmode) == ESP_OK) {
+            s_vout_mode = voutmode;
+            s_vout_mode_cached = true;
+        } else {
+            ESP_LOGW(TAG, "Failed to read VOUT_MODE, using fallback 0x%02X", s_vout_mode);
+        }
+    }
+
+    if (s_vout_mode & 0x10) {
+        // exponent is negative
+        return -1 * ((~s_vout_mode & 0x1F) + 1);
+    }
+    return (s_vout_mode & 0x1F);
+}
+
+/**
  * @brief Convert a ULINEAR16 value into a float
  * the exponent comes from the VOUT_MODE bits[4..0]
  * stored in twos-complement
@@ -289,20 +317,8 @@ static uint16_t float_2_slinear11(float value)
  */
 static float ulinear16_2_float(uint16_t value)
 {
-    uint8_t voutmode;
-    int exponent;
-    float result;
-
-    smb_read_byte(PMBUS_VOUT_MODE, &voutmode);
-
-    if (voutmode & 0x10) {
-        // exponent is negative
-        exponent = -1 * ((~voutmode & 0x1F) + 1);
-    } else {
-        exponent = (voutmode & 0x1F);
-    }
-    result = (value * powf(2.0, exponent));
-    return result;
+    int exponent = get_vout_exponent();
+    return (float)value * powf(2.0f, (float)exponent);
 }
 
 /**
@@ -314,21 +330,8 @@ static float ulinear16_2_float(uint16_t value)
 */
 static uint16_t float_2_ulinear16(float value)
 {
-    uint8_t voutmode;
-    float exponent;
-    uint16_t result;
-
-    smb_read_byte(PMBUS_VOUT_MODE, &voutmode);
-    if (voutmode & 0x10) {
-        // exponent is negative
-        exponent = -1 * ((~voutmode & 0x1F) + 1);
-    } else {
-        exponent = (voutmode & 0x1F);
-    }
-
-    result = (value / powf(2.0, exponent));
-
-    return result;
+    int exponent = get_vout_exponent();
+    return (uint16_t)(value / powf(2.0f, (float)exponent));
 }
 
 /*--- Public TPS546 functions ---*/
@@ -346,6 +349,8 @@ esp_err_t TPS546_init(TPS546_CONFIG config)
     uint8_t voutmode;
 
     tps546_config = config;
+    s_vout_mode_cached = false;
+    s_last_vout_read_us = 0;
 
     ESP_LOGI(TAG, "Initializing the core voltage regulator");
     ESP_RETURN_ON_ERROR(i2c_bitaxe_add_device(TPS546_I2CADDR, &tps546_i2c_handle, TAG), TAG, "Failed to add TPS546 I2C");
@@ -398,8 +403,13 @@ esp_err_t TPS546_init(TPS546_CONFIG config)
     // ESP_LOGI(TAG, "--------------------------------");
     // ESP_LOGI(TAG, "Config version mismatch, writing new config values");
     ESP_LOGI(TAG, "Writing new config values");
-    smb_read_byte(PMBUS_VOUT_MODE, &voutmode);
-    ESP_LOGI(TAG, "VOUT_MODE: %02x", voutmode);
+    if (smb_read_byte(PMBUS_VOUT_MODE, &voutmode) == ESP_OK) {
+        s_vout_mode = voutmode;
+        s_vout_mode_cached = true;
+        ESP_LOGI(TAG, "VOUT_MODE: %02x", voutmode);
+    } else {
+        ESP_LOGW(TAG, "Failed to read VOUT_MODE during init, using fallback 0x%02x", s_vout_mode);
+    }
     TPS546_write_entire_config();
     //}
 
@@ -762,6 +772,11 @@ float TPS546_get_iout(void)
 
 float TPS546_get_vout(void)
 {
+    int64_t now_us = esp_timer_get_time();
+    if (s_last_vout_read_us > 0 && last_vout > 0.0f && (now_us - s_last_vout_read_us) < TPS546_VOUT_CACHE_US) {
+        return last_vout;
+    }
+
     uint16_t u16_value = 0;
     float vout;
 
@@ -775,6 +790,7 @@ float TPS546_get_vout(void)
         ESP_LOGI(TAG, "Got Vout: %2.3f V", vout);
     #endif
         last_vout = vout;
+        s_last_vout_read_us = esp_timer_get_time();
         return vout;
     }
 }
@@ -793,6 +809,21 @@ esp_err_t TPS546_check_status(GlobalState * GLOBAL_STATE) {
         }
     } else {
         SYSTEM_MODULE->power_fault = 0;
+        if (status & TPS546_STATUS_CML) {
+            uint8_t cml_val = 0;
+            esp_err_t cml_err = smb_read_byte(PMBUS_STATUS_CML, &cml_val);
+            GLOBAL_STATE->POWER_MANAGEMENT_MODULE.cml_error_count++;
+            if (cml_err == ESP_OK) {
+                ESP_LOGW(TAG, "TPS546 non-fatal STATUS_CML=0x%02X (word=0x%04X, count=%lu) - clearing fault",
+                         cml_val, status, (unsigned long)GLOBAL_STATE->POWER_MANAGEMENT_MODULE.cml_error_count);
+            } else {
+                ESP_LOGW(TAG, "TPS546 non-fatal STATUS_CML (read 0x7E failed, word=0x%04X, count=%lu) - clearing fault",
+                         status, (unsigned long)GLOBAL_STATE->POWER_MANAGEMENT_MODULE.cml_error_count);
+            }
+            if (TPS546_clear_faults() != ESP_OK) {
+                ESP_LOGW(TAG, "Failed to clear TPS546 CML fault");
+            }
+        }
     }
     return ESP_OK;
 }
@@ -1014,6 +1045,8 @@ static esp_err_t TPS546_parse_status(uint16_t status) {
 esp_err_t TPS546_set_vout(float volts) {
     uint16_t value;
     uint8_t value8;
+
+    s_last_vout_read_us = 0;
 
     if (volts == 0) {
         /* turn off output */

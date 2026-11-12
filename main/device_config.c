@@ -8,6 +8,24 @@
 
 static const char * TAG = "device_config";
 
+static void apply_default_config(GlobalState * GLOBAL_STATE, const DeviceConfig * cfg, const char * override_board_version)
+{
+    GLOBAL_STATE->DEVICE_CONFIG = *cfg;
+    if (override_board_version != NULL) {
+        char * preserved_version = strdup(override_board_version);
+        if (preserved_version != NULL) {
+            GLOBAL_STATE->DEVICE_CONFIG.board_version = preserved_version;
+        }
+    }
+
+    ESP_LOGI(TAG, "Device Model: %s", GLOBAL_STATE->DEVICE_CONFIG.family.name);
+    ESP_LOGI(TAG, "Board Version: %s", GLOBAL_STATE->DEVICE_CONFIG.board_version);
+    ESP_LOGI(TAG, "ASIC: %dx %s (%d cores)",
+             GLOBAL_STATE->DEVICE_CONFIG.family.asic_count,
+             GLOBAL_STATE->DEVICE_CONFIG.family.asic.name,
+             GLOBAL_STATE->DEVICE_CONFIG.family.asic.core_count);
+}
+
 esp_err_t device_config_init(void * pvParameters)
 {
     GlobalState * GLOBAL_STATE = (GlobalState *) pvParameters;
@@ -16,32 +34,48 @@ esp_err_t device_config_init(void * pvParameters)
 
     char * board_version = nvs_config_get_string(NVS_CONFIG_BOARD_VERSION);
 
-    for (int i = 0 ; i < ARRAY_SIZE(default_configs); i++) {
-        if (strcmp(default_configs[i].board_version, board_version) == 0) {
-            GLOBAL_STATE->DEVICE_CONFIG = default_configs[i];
+    if (board_version != NULL) {
+        for (int i = 0 ; i < ARRAY_SIZE(default_configs); i++) {
+            if (strcmp(default_configs[i].board_version, board_version) == 0) {
+                apply_default_config(GLOBAL_STATE, &default_configs[i], NULL);
+                free(board_version);
+                return ESP_OK;
+            }
+        }
 
-            ESP_LOGI(TAG, "Device Model: %s", GLOBAL_STATE->DEVICE_CONFIG.family.name);
-            ESP_LOGI(TAG, "Board Version: %s", GLOBAL_STATE->DEVICE_CONFIG.board_version);
-            ESP_LOGI(TAG, "ASIC: %dx %s (%d cores)", GLOBAL_STATE->DEVICE_CONFIG.family.asic_count, GLOBAL_STATE->DEVICE_CONFIG.family.asic.name, GLOBAL_STATE->DEVICE_CONFIG.family.asic.core_count);
-
-            free(board_version);
-            return ESP_OK;
+        if (strncmp(board_version, "601a", 4) == 0) {
+            for (int i = 0; i < ARRAY_SIZE(default_configs); i++) {
+                if (strcmp(default_configs[i].board_version, "601a") == 0) {
+                    ESP_LOGW(TAG, "Unknown 601a sub-revision '%s', falling back to 601a profile", board_version);
+                    apply_default_config(GLOBAL_STATE, &default_configs[i], board_version);
+                    free(board_version);
+                    return ESP_OK;
+                }
+            }
         }
     }
 
-    ESP_LOGI(TAG, "Custom Board Version: %s", board_version);
+    ESP_LOGI(TAG, "Custom Board Version: %s", board_version ? board_version : "(null)");
 
-    GLOBAL_STATE->DEVICE_CONFIG.board_version = strdup(board_version);
+    GLOBAL_STATE->DEVICE_CONFIG.board_version = board_version ? strdup(board_version) : strdup("unknown");
 
     char * device_model = nvs_config_get_string(NVS_CONFIG_DEVICE_MODEL);
 
-    for (int i = 0 ; i < ARRAY_SIZE(default_families); i++) {
-        if (strcasecmp(default_families[i].name, device_model) == 0) {
-            GLOBAL_STATE->DEVICE_CONFIG.family = default_families[i];
+    bool family_matched = false;
+    if (device_model != NULL) {
+        for (int i = 0 ; i < ARRAY_SIZE(default_families); i++) {
+            if (strcasecmp(default_families[i].name, device_model) == 0) {
+                GLOBAL_STATE->DEVICE_CONFIG.family = default_families[i];
 
-            ESP_LOGI(TAG, "Device Model: %s", GLOBAL_STATE->DEVICE_CONFIG.family.name);
+                ESP_LOGI(TAG, "Device Model: %s", GLOBAL_STATE->DEVICE_CONFIG.family.name);
+                family_matched = true;
+                break;
+            }
+        }
 
-            break;
+        if (!family_matched && strcasecmp(device_model, "LT-001") == 0) {
+            GLOBAL_STATE->DEVICE_CONFIG.family = FAMILY_GAMMA_V2;
+            ESP_LOGI(TAG, "Device Model (alias %s): %s", device_model, GLOBAL_STATE->DEVICE_CONFIG.family.name);
         }
     }
 

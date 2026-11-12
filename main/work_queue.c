@@ -55,21 +55,28 @@ void *queue_dequeue_timeout(work_queue *queue, int timeout_ms)
 {
     pthread_mutex_lock(&queue->lock);
 
-    while (queue->count == 0)
-    {
-        struct timespec timeout_time;
+    if (queue->count == 0 && timeout_ms <= 0) {
+        pthread_mutex_unlock(&queue->lock);
+        return NULL;
+    }
+
+    struct timespec timeout_time;
+    if (queue->count == 0) {
         clock_gettime(CLOCK_REALTIME, &timeout_time);
 
         // Add timeout_ms milliseconds to current time
         timeout_time.tv_sec += timeout_ms / 1000;
-        timeout_time.tv_nsec += (timeout_ms % 1000) * 1000000;
+        timeout_time.tv_nsec += (timeout_ms % 1000) * 1000000L;
 
         // Handle nanosecond overflow
-        if (timeout_time.tv_nsec >= 1000000000) {
+        if (timeout_time.tv_nsec >= 1000000000L) {
             timeout_time.tv_sec += 1;
-            timeout_time.tv_nsec -= 1000000000;
+            timeout_time.tv_nsec -= 1000000000L;
         }
+    }
 
+    while (queue->count == 0)
+    {
         int result = pthread_cond_timedwait(&queue->not_empty, &queue->lock, &timeout_time);
         if (result == ETIMEDOUT) {
             // Timeout occurred, return NULL

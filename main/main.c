@@ -34,6 +34,11 @@ static GlobalState GLOBAL_STATE;
 
 static const char * TAG = "bitaxe";
 
+static inline UBaseType_t psram_stack_caps(void)
+{
+    return esp_psram_is_initialized() ? (MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) : MALLOC_CAP_DEFAULT;
+}
+
 static void heap_alloc_failed_hook(size_t requested_size, uint32_t caps, const char *function_name)
 {
     if (caps & MALLOC_CAP_SPIRAM) {
@@ -73,11 +78,11 @@ void app_main(void)
 
     ESP_LOGI(TAG, "Welcome to the bitaxe - FOSS || GTFO!");
 
-    if (xTaskCreateWithCaps(cpu_monitor_task, "cpu_monitor", 4096, (void *)&GLOBAL_STATE, 1, NULL, MALLOC_CAP_SPIRAM) != pdPASS) {
+    if (xTaskCreatePinnedToCoreWithCaps(cpu_monitor_task, "cpu_monitor", 4096, (void *)&GLOBAL_STATE, 1, NULL, 0, psram_stack_caps()) != pdPASS) {
         ESP_LOGE(TAG, "Error creating cpu monitor task");
     }
 #ifdef CONFIG_ENABLE_TASK_MONITOR
-    if (xTaskCreateWithCaps(task_monitor_task, "task_monitor", 8192, NULL, 1, NULL, MALLOC_CAP_SPIRAM) != pdPASS) {
+    if (xTaskCreatePinnedToCoreWithCaps(task_monitor_task, "task_monitor", 8192, NULL, 1, NULL, 0, psram_stack_caps()) != pdPASS) {
         ESP_LOGE(TAG, "Error creating task monitor task");
     }
 #endif
@@ -135,11 +140,11 @@ void app_main(void)
     esp_err_t system_init_ret = SYSTEM_init_peripherals(&GLOBAL_STATE);
     
     if (system_init_ret == ESP_OK) {
-        if (xTaskCreate(POWER_MANAGEMENT_task, "power management", 8192, (void *) &GLOBAL_STATE, 10, NULL) != pdPASS) {
+        if (xTaskCreatePinnedToCoreWithCaps(POWER_MANAGEMENT_task, "power management", 8192, (void *) &GLOBAL_STATE, 10, NULL, 0, psram_stack_caps()) != pdPASS) {
             ESP_LOGE(TAG, "Error creating power management task");
         }
         if (!GLOBAL_STATE.SELF_TEST_MODULE.is_active) {
-            if (xTaskCreate(FAN_CONTROLLER_task, "fan_controller", 8192, (void *) &GLOBAL_STATE, 5, NULL) != pdPASS) {
+            if (xTaskCreatePinnedToCoreWithCaps(FAN_CONTROLLER_task, "fan_controller", 8192, (void *) &GLOBAL_STATE, 5, NULL, 0, psram_stack_caps()) != pdPASS) {
                 ESP_LOGE(TAG, "Error creating fan controller task");
             }
         }
@@ -177,30 +182,30 @@ void app_main(void)
             self_test_show_message(&GLOBAL_STATE, GLOBAL_STATE.SYSTEM_MODULE.asic_status);
             system_init_ret = ESP_FAIL;
         } else {
-            if (xTaskCreate(create_jobs_task, "stratum miner", 8192, (void *) &GLOBAL_STATE, 20, NULL) != pdPASS) {
+            if (xTaskCreatePinnedToCoreWithCaps(create_jobs_task, "stratum miner", 8192, (void *) &GLOBAL_STATE, 10, NULL, 1, psram_stack_caps()) != pdPASS) {
                 ESP_LOGE(TAG, "Error creating stratum miner task");
             }
-            if (xTaskCreate(ASIC_result_task, "asic result", 8192, (void *) &GLOBAL_STATE, 15, NULL) != pdPASS) {
+            if (xTaskCreatePinnedToCoreWithCaps(ASIC_result_task, "asic result", 8192, (void *) &GLOBAL_STATE, 15, NULL, 1, psram_stack_caps()) != pdPASS) {
                 ESP_LOGE(TAG, "Error creating asic result task");
             }
 
-            if (xTaskCreateWithCaps(hashrate_monitor_task, "hashrate monitor", 8192, (void *) &GLOBAL_STATE, 5, NULL, MALLOC_CAP_SPIRAM) != pdPASS) {
+            if (xTaskCreatePinnedToCoreWithCaps(hashrate_monitor_task, "hashrate monitor", 8192, (void *) &GLOBAL_STATE, 5, NULL, 1, psram_stack_caps()) != pdPASS) {
                 ESP_LOGE(TAG, "Error creating hashrate monitor task");
             }
-            if (xTaskCreateWithCaps(statistics_task, "statistics", 8192, (void *) &GLOBAL_STATE, 3, NULL, MALLOC_CAP_SPIRAM) != pdPASS) {
+            if (xTaskCreatePinnedToCoreWithCaps(statistics_task, "statistics", 8192, (void *) &GLOBAL_STATE, 3, NULL, 0, psram_stack_caps()) != pdPASS) {
                 ESP_LOGE(TAG, "Error creating statistics task");
             }
         }
     }
 
     protocol_coordinator_init(&GLOBAL_STATE);
-    if (xTaskCreateWithCaps(protocol_coordinator_task, "protocol coord", 3072, (void *) &GLOBAL_STATE, 5, NULL, MALLOC_CAP_SPIRAM) != pdPASS) {
+    if (xTaskCreatePinnedToCoreWithCaps(protocol_coordinator_task, "protocol coord", 3072, (void *) &GLOBAL_STATE, 5, NULL, 0, psram_stack_caps()) != pdPASS) {
         ESP_LOGE(TAG, "Error creating protocol coordinator task");
     }
 
     if (GLOBAL_STATE.SELF_TEST_MODULE.is_active) {
         GLOBAL_STATE.SELF_TEST_MODULE.system_init_ret = system_init_ret;
-        if (xTaskCreateWithCaps(self_test_task, "self_test", 8192, (void *) &GLOBAL_STATE, 10, NULL, MALLOC_CAP_SPIRAM) != pdPASS) {
+        if (xTaskCreatePinnedToCoreWithCaps(self_test_task, "self_test", 8192, (void *) &GLOBAL_STATE, 10, NULL, 0, psram_stack_caps()) != pdPASS) {
             ESP_LOGE(TAG, "Error creating self test task");
         }
     }

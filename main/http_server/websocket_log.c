@@ -1,8 +1,11 @@
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 #include <stdbool.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "esp_heap_caps.h"
+#include "esp_psram.h"
 #include "esp_log.h"
 #include "esp_http_server.h"
 #include "websocket.h"
@@ -19,7 +22,9 @@ void websocket_log_task(void *pvParameters)
 
     // Initialize position to the current end of buffer to start with "live" logs
     uint64_t last_read_abs = log_buffer_get_total_written();
-    char *scratch_buf = (char *)malloc(WS_LOG_CHUNK_SIZE);
+    char *scratch_buf = (char *)(esp_psram_is_initialized()
+        ? heap_caps_malloc(WS_LOG_CHUNK_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
+        : malloc(WS_LOG_CHUNK_SIZE));
     if (!scratch_buf) {
         ESP_LOGE(TAG, "Failed to allocate scratch buffer");
         vTaskDelete(NULL);

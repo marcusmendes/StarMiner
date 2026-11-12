@@ -1,4 +1,7 @@
+#include <math.h>
 #include "esp_log.h"
+#include "esp_system.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "global_state.h"
@@ -25,6 +28,11 @@
 #define TPS546_MAX_TEMP 145.0
 
 #define ASIC_REDUCTION 100.0
+
+#define WATCHDOG_FAILURE_WINDOW_US  (10LL * 60LL * 1000000LL)
+#define WATCHDOG_FREQ_STEP_DOWN_MHZ 12.5f
+#define WATCHDOG_MIN_FREQ_MHZ       400.0f
+#define WATCHDOG_RECOVERY_DELAY_MS  2000
 
 static const char * TAG = "power_management";
 
@@ -79,6 +87,7 @@ static uint8_t mining_start(GlobalState * GLOBAL_STATE)
     uint8_t chip_count = asic_initialize(GLOBAL_STATE, ASIC_INIT_RECOVERY, 2000);
 
     if (chip_count > 0) {
+        GLOBAL_STATE->POWER_MANAGEMENT_MODULE.last_freq_change_us = esp_timer_get_time();
         ESP_LOGI(TAG, "Mining started successfully (%d chip(s))", chip_count);
     } else {
         ESP_LOGE(TAG, "Mining start failed - ASIC not detected");
@@ -92,18 +101,79 @@ static float expected_hashrate(GlobalState * GLOBAL_STATE)
     return GLOBAL_STATE->POWER_MANAGEMENT_MODULE.frequency_value * GLOBAL_STATE->DEVICE_CONFIG.family.asic.small_core_count * GLOBAL_STATE->DEVICE_CONFIG.family.asic_count / 1000.0;
 }
 
+static float calculate_effective_frequency(float nvs_freq, float offset_mhz)
+{
+    if (nvs_freq >= WATCHDOG_MIN_FREQ_MHZ) {
+        return fmaxf(WATCHDOG_MIN_FREQ_MHZ, nvs_freq - offset_mhz);
+    }
+    return nvs_freq;
+}
+
+static void reset_watchdog_state(PowerManagementModule * power_management)
+{
+    power_management->watchdog_freq_offset_mhz = 0.0f;
+    power_management->watchdog_consecutive_failures = 0;
+    power_management->watchdog_last_failure_us = 0;
+    power_management->asic_watchdog_trigger = false;
+}
+
+static void handle_asic_watchdog(GlobalState * GLOBAL_STATE)
+{
+    PowerManagementModule * power_management = &GLOBAL_STATE->POWER_MANAGEMENT_MODULE;
+    int64_t now_us = esp_timer_get_time();
+
+    if (power_management->watchdog_last_failure_us > 0 &&
+        (now_us - power_management->watchdog_last_failure_us) < WATCHDOG_FAILURE_WINDOW_US) {
+        power_management->watchdog_consecutive_failures++;
+    } else {
+        power_management->watchdog_consecutive_failures = 1;
+    }
+    power_management->watchdog_last_failure_us = now_us;
+
+    if (power_management->watchdog_consecutive_failures >= 4) {
+        ESP_LOGE(TAG, "ASIC Watchdog Level 3 (%u consecutive failures in <10 min) - restarting system",
+                 power_management->watchdog_consecutive_failures);
+        vTaskDelay(pdMS_TO_TICKS(100));
+        esp_restart();
+        return;
+    }
+
+    if (power_management->watchdog_consecutive_failures >= 2) {
+        float nvs_freq = nvs_config_get_float(NVS_CONFIG_ASIC_FREQUENCY);
+        if (nvs_freq > WATCHDOG_MIN_FREQ_MHZ) {
+            float max_offset = nvs_freq - WATCHDOG_MIN_FREQ_MHZ;
+            power_management->watchdog_freq_offset_mhz = fminf(
+                max_offset,
+                power_management->watchdog_freq_offset_mhz + WATCHDOG_FREQ_STEP_DOWN_MHZ);
+        }
+        float effective_freq = calculate_effective_frequency(nvs_freq, power_management->watchdog_freq_offset_mhz);
+        ESP_LOGW(TAG, "ASIC Watchdog Level 2 (failure %u/3 in <10 min): RAM step-down to %.1f MHz (NVS %.1f MHz unchanged)",
+                 power_management->watchdog_consecutive_failures, effective_freq, nvs_freq);
+    } else {
+        ESP_LOGW(TAG, "ASIC Watchdog Level 1 (failure 1/3): soft re-init of ASIC");
+    }
+
+    mining_stop(GLOBAL_STATE);
+    vTaskDelay(pdMS_TO_TICKS(WATCHDOG_RECOVERY_DELAY_MS));
+    mining_start(GLOBAL_STATE);
+    power_management->watchdog_resets++;
+}
+
 void POWER_MANAGEMENT_init_frequency(void * pvParameters)
 {
     GlobalState * GLOBAL_STATE = (GlobalState *) pvParameters;
+    PowerManagementModule * power_management = &GLOBAL_STATE->POWER_MANAGEMENT_MODULE;
 
-    float frequency = nvs_config_get_float(NVS_CONFIG_ASIC_FREQUENCY);
+    float nvs_freq = nvs_config_get_float(NVS_CONFIG_ASIC_FREQUENCY);
+    float frequency = calculate_effective_frequency(nvs_freq, power_management->watchdog_freq_offset_mhz);
 
-    GLOBAL_STATE->POWER_MANAGEMENT_MODULE.frequency_value = frequency;
-    GLOBAL_STATE->POWER_MANAGEMENT_MODULE.actual_frequency = 50.0;
-    GLOBAL_STATE->POWER_MANAGEMENT_MODULE.expected_hashrate = expected_hashrate(GLOBAL_STATE);
-    
+    power_management->frequency_value = frequency;
+    power_management->actual_frequency = 50.0;
+    power_management->expected_hashrate = expected_hashrate(GLOBAL_STATE);
+    power_management->last_freq_change_us = esp_timer_get_time();
+
     char expected_hashrate_str[16] = {0};
-    suffixString(GLOBAL_STATE->POWER_MANAGEMENT_MODULE.expected_hashrate * 1e6, expected_hashrate_str, sizeof(expected_hashrate_str), 0);
+    suffixString(power_management->expected_hashrate * 1e6, expected_hashrate_str, sizeof(expected_hashrate_str), 0);
     ESP_LOGI(TAG, "ASIC Frequency: %g MHz, Expected hashrate: %sH/s", frequency, expected_hashrate_str);
 }
 
@@ -117,8 +187,9 @@ void POWER_MANAGEMENT_task(void * pvParameters)
     SystemModule * sys_module = &GLOBAL_STATE->SYSTEM_MODULE;
 
     POWER_MANAGEMENT_init_frequency(GLOBAL_STATE);
-    
-    float last_asic_frequency = power_management->frequency_value;
+
+    float last_nvs_asic_frequency = nvs_config_get_float(NVS_CONFIG_ASIC_FREQUENCY);
+    bool prev_asic_initialized = GLOBAL_STATE->ASIC_initalized;
 
     vTaskDelay(500 / portTICK_PERIOD_MS);
     uint16_t last_core_voltage = 0.0;
@@ -134,6 +205,12 @@ void POWER_MANAGEMENT_task(void * pvParameters)
             return;
         }
 
+        bool cur_asic_initialized = GLOBAL_STATE->ASIC_initalized;
+        if (!prev_asic_initialized && cur_asic_initialized) {
+            power_management->last_freq_change_us = esp_timer_get_time();
+        }
+        prev_asic_initialized = cur_asic_initialized;
+
         power_management->voltage = Power_get_input_voltage(GLOBAL_STATE);
         Power_get_output(GLOBAL_STATE, &power_management->power, &power_management->current);
         power_management->core_voltage = VCORE_get_voltage_mv(GLOBAL_STATE);
@@ -147,13 +224,16 @@ void POWER_MANAGEMENT_task(void * pvParameters)
         if (wants_stop && !is_paused) {
             mining_stop(GLOBAL_STATE);
             is_paused = true;
+            prev_asic_initialized = GLOBAL_STATE->ASIC_initalized;
         } else if (!wants_stop && is_paused) {
             mining_start(GLOBAL_STATE);
             is_paused = false;
+            prev_asic_initialized = GLOBAL_STATE->ASIC_initalized;
         }
 
         // If we've paused or have a hardware fault, skip doing anything else
         if (is_paused || sys_module->hardware_fault) {
+            power_management->asic_watchdog_trigger = false;
             vTaskDelay(POLL_RATE / portTICK_PERIOD_MS);
             continue;
         }
@@ -218,10 +298,12 @@ void POWER_MANAGEMENT_task(void * pvParameters)
             ESP_LOGI(TAG, "Restoring at reduced settings: %umV (was %umV), %.0f MHz (was %.0f MHz)",
                      reduced_voltage, last_known_asic_voltage, reduced_asic_frequency, last_known_asic_frequency);
 
+            reset_watchdog_state(power_management);
             uint8_t chip_count = mining_start(GLOBAL_STATE);
+            prev_asic_initialized = GLOBAL_STATE->ASIC_initalized;
 
             if (chip_count > 0) {
-                // Frequency reduction will now be applied by normal power management loop
+                last_nvs_asic_frequency = reduced_asic_frequency;
                 nvs_config_set_bool(NVS_CONFIG_OVERHEAT_MODE, false);
                 ESP_LOGI(TAG, "Resuming normal operation. Reduced frequency (%.0f MHz) will be applied automatically.", reduced_asic_frequency);
             }
@@ -238,16 +320,18 @@ void POWER_MANAGEMENT_task(void * pvParameters)
             last_core_voltage = core_voltage;
         }
 
-        if (asic_frequency != last_asic_frequency) {
-            ESP_LOGI(TAG, "New ASIC frequency requested: %g MHz (current: %g MHz)", asic_frequency, last_asic_frequency);
-            
+        if (asic_frequency != last_nvs_asic_frequency) {
+            ESP_LOGI(TAG, "New ASIC frequency requested: %g MHz (current NVS: %g MHz)", asic_frequency, last_nvs_asic_frequency);
+
+            reset_watchdog_state(power_management);
             power_management->frequency_value = asic_frequency;
             power_management->expected_hashrate = expected_hashrate(GLOBAL_STATE);
 
             ASIC_set_frequency(GLOBAL_STATE);
             ASIC_set_nonce_space(GLOBAL_STATE);
-            
-            last_asic_frequency = asic_frequency;
+
+            power_management->last_freq_change_us = esp_timer_get_time();
+            last_nvs_asic_frequency = asic_frequency;
         }
 
         // Check for changing of overheat mode
@@ -259,6 +343,17 @@ void POWER_MANAGEMENT_task(void * pvParameters)
         }
 
         VCORE_check_fault(GLOBAL_STATE);
+
+        if (power_management->asic_watchdog_trigger) {
+            power_management->asic_watchdog_trigger = false;
+
+            if (!sys_module->overheat_mode && sys_module->power_fault == 0 &&
+                !sys_module->hardware_fault && !sys_module->mining_paused &&
+                !sys_module->pools_unavailable && !GLOBAL_STATE->SELF_TEST_MODULE.is_active) {
+                handle_asic_watchdog(GLOBAL_STATE);
+                prev_asic_initialized = GLOBAL_STATE->ASIC_initalized;
+            }
+        }
 
         // looper:
         vTaskDelay(POLL_RATE / portTICK_PERIOD_MS);

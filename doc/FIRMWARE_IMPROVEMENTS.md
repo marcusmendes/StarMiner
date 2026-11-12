@@ -230,9 +230,9 @@ Seguindo rigorosamente as convenções do [`AGENTS.md`](../AGENTS.md) (flags boo
   - [x] Tratar `TPS546_STATUS_CML` com log, contador `cml_error_count` e `PMBUS_CLEAR_FAULTS` sem derrubar a mineração.
   - [x] Adicionar `i2c_master_bus_reset()` nos retries de [`i2c_bitaxe.c`](../main/i2c_bitaxe.c).
   - [x] Implementar Watchdog de `0 GH/s` (`60 s`) e domínios congelados (`< 10%` por `45 s`) com recuperação em 3 níveis na `POWER_MANAGEMENT_task` (1º re-init normal; 2º/3º re-init com `-12.5 MHz` em RAM; 4º `esp_restart()`).
-- [ ] **Fase 3 (*Soft-Throttling* Térmico em RAM & Emergência Segura):**
-  - [ ] Implementar *Soft-Throttling* progressivo em RAM (`>= 68 °C` ASIC ou `>= 90 °C` VR) e rampa de recuperação com histerese (`< 65 °C` ASIC e `< 85 °C` VR por `30 s`).
-  - [ ] Garantir que a parada de emergência crítica (`>= 75 °C` ASIC ou `>= 105 °C` VR) acione `mining_stop()` e `overheat_mode = 1` **sem sobrescrever** tensão, frequência e modo do fan na NVS.
+- [x] **Fase 3 (*Soft-Throttling* Térmico em RAM & Emergência Segura):**
+  - [x] Implementar *Soft-Throttling* progressivo em RAM (`>= 68 °C` ASIC ou `>= 90 °C` VR) e rampa de recuperação com histerese (`< 65 °C` ASIC e `< 85 °C` VR por `30 s`).
+  - [x] Garantir que a parada de emergência crítica (`>= 75 °C` ASIC ou `>= 105 °C` VR) acione `mining_stop()` e `overheat_mode = 1` **sem sobrescrever** tensão, frequência e modo do fan na NVS.
 - [ ] **Fase 4 (*Vdroop*, Auto-Tuner DVFS & API/UI `AxeOS`):**
   - [ ] Implementar compensação de *Vdroop* em malha lenta (teto `+20 mV`) e perfis DVFS (`Manual`, `Eficiência`, `Equilibrado`, `Performance`).
   - [ ] Atualizar [`system_api_json.c`](../main/http_server/system_api_json.c), [`http_server.c`](../main/http_server/http_server.c), [`openapi.yaml`](../main/http_server/axe-os/openapi.yaml), regenerar API (`npm run generate:api`), atualizar mocks em [`system.service.ts`](../main/http_server/axe-os/src/app/services/system.service.ts) e validar com `npm run test:ci` e `idf.py build`.

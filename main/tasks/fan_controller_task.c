@@ -68,8 +68,9 @@ void FAN_CONTROLLER_task(void * pvParameters)
     TickType_t taskWakeTime = xTaskGetTickCount();
 
     while (1) {
-        if (nvs_config_get_bool(NVS_CONFIG_OVERHEAT_MODE)) {
-            update_fan_speed(GLOBAL_STATE, 100.0f, "Overheat");
+        bool overheat_active = GLOBAL_STATE->SYSTEM_MODULE.overheat_mode || nvs_config_get_bool(NVS_CONFIG_OVERHEAT_MODE);
+        if (overheat_active || power_management->throttle_active) {
+            update_fan_speed(GLOBAL_STATE, 100.0f, overheat_active ? "Overheat" : "Throttle");
         } else if (GLOBAL_STATE->SYSTEM_MODULE.mining_paused) {
             update_fan_speed(GLOBAL_STATE, 30.0f, "Paused");
         } else if (GLOBAL_STATE->SYSTEM_MODULE.pools_unavailable) {

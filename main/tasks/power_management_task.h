@@ -26,6 +26,14 @@ typedef struct
     int64_t watchdog_last_failure_us;
     int64_t last_freq_change_us;
     float watchdog_freq_offset_mhz;
+    float target_frequency;
+    uint16_t target_voltage;
+    uint16_t actual_voltage_mv;
+    bool throttle_active;
+    float thermal_offset_mhz;
+    uint16_t thermal_offset_mv;
+    int64_t last_throttle_step_us;
+    int64_t safe_zone_since_us;
 } PowerManagementModule;
 
 void POWER_MANAGEMENT_init_frequency(void * pvParameters);

@@ -16,25 +16,77 @@
 #include "driver/uart.h"
 
 #define POLL_RATE 100
-#define MAX_TEMP 90.0
-#define THROTTLE_TEMP 75.0
-#define SAFE_TEMP 45.0
 
-#define VOLTAGE_START_THROTTLE 4900
-#define VOLTAGE_MIN_THROTTLE 3500
-#define VOLTAGE_RANGE (VOLTAGE_START_THROTTLE - VOLTAGE_MIN_THROTTLE)
+// Hard Caps (physical safety limits in RAM)
+#define VCORE_MIN_MV 1000
+#define VCORE_MAX_MV 1250
+#define FREQ_MIN_MHZ 400.0f
+#define MAX_POWER_W 32.0f
 
-#define TPS546_THROTTLE_TEMP 105.0
-#define TPS546_MAX_TEMP 145.0
+// Thermal thresholds (Celsius)
+#define ASIC_SOFT_THROTTLE_TEMP 68.0f
+#define ASIC_SEVERE_THROTTLE_TEMP 72.0f
+#define ASIC_EMERGENCY_TEMP 75.0f
+#define ASIC_SAFE_RECOVERY_TEMP 65.0f
 
-#define ASIC_REDUCTION 100.0
+#define VR_SOFT_THROTTLE_TEMP 90.0f
+#define VR_SEVERE_THROTTLE_TEMP 98.0f
+#define VR_EMERGENCY_TEMP 105.0f
+#define VR_SAFE_RECOVERY_TEMP 85.0f
+
+// Soft-throttling and hysteresis timing / step sizes
+#define THROTTLE_STEP_INTERVAL_US     (10LL * 1000000LL)
+#define RECOVERY_HOLD_US              (30LL * 1000000LL)
+#define RECOVERY_STEP_INTERVAL_US     (15LL * 1000000LL)
+#define THROTTLE_FREQ_STEP_MHZ        12.5f
+#define THROTTLE_SEVERE_FREQ_STEP_MHZ 25.0f
+#define THROTTLE_VCORE_STEP_MV        10
 
 #define WATCHDOG_FAILURE_WINDOW_US  (10LL * 60LL * 1000000LL)
 #define WATCHDOG_FREQ_STEP_DOWN_MHZ 12.5f
-#define WATCHDOG_MIN_FREQ_MHZ       400.0f
+#define WATCHDOG_MIN_FREQ_MHZ       FREQ_MIN_MHZ
 #define WATCHDOG_RECOVERY_DELAY_MS  2000
 
 static const char * TAG = "power_management";
+
+static bool is_valid_temp(float temp)
+{
+    return !isnan(temp) && temp > 0.0f;
+}
+
+static uint16_t clamp_vcore_mv(uint16_t voltage_mv)
+{
+    if (voltage_mv < VCORE_MIN_MV) {
+        return VCORE_MIN_MV;
+    }
+    if (voltage_mv > VCORE_MAX_MV) {
+        return VCORE_MAX_MV;
+    }
+    return voltage_mv;
+}
+
+static uint16_t calculate_effective_voltage(uint16_t target_voltage_mv, uint16_t thermal_offset_mv)
+{
+    uint16_t clamped_target = clamp_vcore_mv(target_voltage_mv);
+    if (thermal_offset_mv >= clamped_target) {
+        return VCORE_MIN_MV;
+    }
+    return clamp_vcore_mv(clamped_target - thermal_offset_mv);
+}
+
+static float calculate_effective_frequency(float target_freq, float offset_mhz)
+{
+    return fmaxf(FREQ_MIN_MHZ, target_freq - offset_mhz);
+}
+
+static void reset_thermal_throttle_state(PowerManagementModule * power_management)
+{
+    power_management->throttle_active = false;
+    power_management->thermal_offset_mhz = 0.0f;
+    power_management->thermal_offset_mv = 0;
+    power_management->last_throttle_step_us = 0;
+    power_management->safe_zone_since_us = 0;
+}
 
 static void mining_stop(GlobalState * GLOBAL_STATE)
 {
@@ -51,6 +103,7 @@ static void mining_stop(GlobalState * GLOBAL_STATE)
 
     // Cut ASIC power and hold in reset
     VCORE_set_voltage(GLOBAL_STATE, 0.0f);
+    GLOBAL_STATE->POWER_MANAGEMENT_MODULE.actual_voltage_mv = 0;
     asic_hold_reset_low();
 
     // Mark uninitialized immediately so tasks stop issuing UART commands
@@ -70,9 +123,15 @@ static uint8_t mining_start(GlobalState * GLOBAL_STATE)
 {
     ESP_LOGI(TAG, "Starting mining");
 
-    // Restore voltage from NVS
-    uint16_t voltage = nvs_config_get_u16(NVS_CONFIG_ASIC_VOLTAGE);
-    VCORE_set_voltage(GLOBAL_STATE, (double) voltage / 1000.0);
+    PowerManagementModule * power_management = &GLOBAL_STATE->POWER_MANAGEMENT_MODULE;
+    uint16_t target_voltage = GLOBAL_STATE->SELF_TEST_MODULE.is_active
+                                  ? GLOBAL_STATE->DEVICE_CONFIG.family.asic.default_voltage_mv
+                                  : nvs_config_get_u16(NVS_CONFIG_ASIC_VOLTAGE);
+    power_management->target_voltage = target_voltage;
+
+    uint16_t effective_voltage_mv = calculate_effective_voltage(target_voltage, power_management->thermal_offset_mv);
+    VCORE_set_voltage(GLOBAL_STATE, (double) effective_voltage_mv / 1000.0);
+    power_management->actual_voltage_mv = effective_voltage_mv;
 
     // Wait for voltage to stabilize before touching the ASIC
     vTaskDelay(500 / portTICK_PERIOD_MS);
@@ -99,14 +158,6 @@ static uint8_t mining_start(GlobalState * GLOBAL_STATE)
 static float expected_hashrate(GlobalState * GLOBAL_STATE)
 {
     return GLOBAL_STATE->POWER_MANAGEMENT_MODULE.frequency_value * GLOBAL_STATE->DEVICE_CONFIG.family.asic.small_core_count * GLOBAL_STATE->DEVICE_CONFIG.family.asic_count / 1000.0;
-}
-
-static float calculate_effective_frequency(float nvs_freq, float offset_mhz)
-{
-    if (nvs_freq >= WATCHDOG_MIN_FREQ_MHZ) {
-        return fmaxf(WATCHDOG_MIN_FREQ_MHZ, nvs_freq - offset_mhz);
-    }
-    return nvs_freq;
 }
 
 static void reset_watchdog_state(PowerManagementModule * power_management)
@@ -146,7 +197,9 @@ static void handle_asic_watchdog(GlobalState * GLOBAL_STATE)
                 max_offset,
                 power_management->watchdog_freq_offset_mhz + WATCHDOG_FREQ_STEP_DOWN_MHZ);
         }
-        float effective_freq = calculate_effective_frequency(nvs_freq, power_management->watchdog_freq_offset_mhz);
+        float effective_freq = calculate_effective_frequency(
+            nvs_freq,
+            power_management->watchdog_freq_offset_mhz + power_management->thermal_offset_mhz);
         ESP_LOGW(TAG, "ASIC Watchdog Level 2 (failure %u/3 in <10 min): RAM step-down to %.1f MHz (NVS %.1f MHz unchanged)",
                  power_management->watchdog_consecutive_failures, effective_freq, nvs_freq);
     } else {
@@ -165,7 +218,10 @@ void POWER_MANAGEMENT_init_frequency(void * pvParameters)
     PowerManagementModule * power_management = &GLOBAL_STATE->POWER_MANAGEMENT_MODULE;
 
     float nvs_freq = nvs_config_get_float(NVS_CONFIG_ASIC_FREQUENCY);
-    float frequency = calculate_effective_frequency(nvs_freq, power_management->watchdog_freq_offset_mhz);
+    power_management->target_frequency = nvs_freq;
+
+    float total_offset = power_management->watchdog_freq_offset_mhz + power_management->thermal_offset_mhz;
+    float frequency = calculate_effective_frequency(nvs_freq, total_offset);
 
     power_management->frequency_value = frequency;
     power_management->actual_frequency = 50.0;
@@ -177,6 +233,248 @@ void POWER_MANAGEMENT_init_frequency(void * pvParameters)
     ESP_LOGI(TAG, "ASIC Frequency: %g MHz, Expected hashrate: %sH/s", frequency, expected_hashrate_str);
 }
 
+static void clamp_thermal_offsets_to_headroom(PowerManagementModule * power_management)
+{
+    uint16_t clamped_target_vcore = clamp_vcore_mv(power_management->target_voltage);
+    uint16_t max_vcore_offset = (clamped_target_vcore > VCORE_MIN_MV) ? (clamped_target_vcore - VCORE_MIN_MV) : 0;
+    if (power_management->thermal_offset_mv > max_vcore_offset) {
+        power_management->thermal_offset_mv = max_vcore_offset;
+    }
+
+    float max_freq_offset = fmaxf(0.0f, power_management->target_frequency - power_management->watchdog_freq_offset_mhz - FREQ_MIN_MHZ);
+    if (power_management->thermal_offset_mhz > max_freq_offset) {
+        power_management->thermal_offset_mhz = max_freq_offset;
+    }
+}
+
+static void apply_effective_voltage(GlobalState * GLOBAL_STATE, uint16_t effective_voltage_mv)
+{
+    PowerManagementModule * power_management = &GLOBAL_STATE->POWER_MANAGEMENT_MODULE;
+    if (effective_voltage_mv == power_management->actual_voltage_mv) {
+        return;
+    }
+
+    ESP_LOGI(TAG, "Setting VCore to %umV (target: %umV, thermal offset: -%umV)",
+             effective_voltage_mv, power_management->target_voltage, power_management->thermal_offset_mv);
+    VCORE_set_voltage(GLOBAL_STATE, (double) effective_voltage_mv / 1000.0);
+    power_management->actual_voltage_mv = effective_voltage_mv;
+}
+
+static void apply_effective_frequency(GlobalState * GLOBAL_STATE, float effective_freq_mhz)
+{
+    PowerManagementModule * power_management = &GLOBAL_STATE->POWER_MANAGEMENT_MODULE;
+    if (fabsf(effective_freq_mhz - power_management->frequency_value) <= 0.001f) {
+        return;
+    }
+
+    power_management->frequency_value = effective_freq_mhz;
+    power_management->expected_hashrate = expected_hashrate(GLOBAL_STATE);
+
+    if (GLOBAL_STATE->ASIC_initalized) {
+        ESP_LOGI(TAG, "Setting ASIC frequency to %g MHz (target: %g MHz, thermal: -%g MHz, watchdog: -%g MHz)",
+                 effective_freq_mhz, power_management->target_frequency,
+                 power_management->thermal_offset_mhz, power_management->watchdog_freq_offset_mhz);
+        ASIC_set_frequency(GLOBAL_STATE);
+        ASIC_set_nonce_space(GLOBAL_STATE);
+        power_management->last_freq_change_us = esp_timer_get_time();
+    }
+}
+
+static void apply_effective_power_and_freq(GlobalState * GLOBAL_STATE)
+{
+    PowerManagementModule * power_management = &GLOBAL_STATE->POWER_MANAGEMENT_MODULE;
+
+    uint16_t effective_voltage_mv = calculate_effective_voltage(power_management->target_voltage,
+                                                                power_management->thermal_offset_mv);
+    float total_freq_offset_mhz = power_management->watchdog_freq_offset_mhz + power_management->thermal_offset_mhz;
+    float effective_freq_mhz = calculate_effective_frequency(power_management->target_frequency,
+                                                             total_freq_offset_mhz);
+
+    // Lower frequency before dropping VCore when stepping down; raise VCore before raising frequency.
+    if (effective_freq_mhz < power_management->frequency_value) {
+        apply_effective_frequency(GLOBAL_STATE, effective_freq_mhz);
+        apply_effective_voltage(GLOBAL_STATE, effective_voltage_mv);
+    } else {
+        apply_effective_voltage(GLOBAL_STATE, effective_voltage_mv);
+        apply_effective_frequency(GLOBAL_STATE, effective_freq_mhz);
+    }
+}
+
+static void handle_thermal_state_machine(GlobalState * GLOBAL_STATE, bool * prev_asic_initialized)
+{
+    PowerManagementModule * power_management = &GLOBAL_STATE->POWER_MANAGEMENT_MODULE;
+    SystemModule * sys_module = &GLOBAL_STATE->SYSTEM_MODULE;
+
+    int64_t now_us = esp_timer_get_time();
+    float chip1 = power_management->chip_temp_avg;
+    float chip2 = power_management->chip_temp2_avg;
+    float vr = power_management->vr_temp;
+    float power = power_management->power;
+
+    bool chip1_valid = is_valid_temp(chip1);
+    bool chip2_valid = is_valid_temp(chip2);
+    bool vr_valid = is_valid_temp(vr);
+    bool power_valid = !isnan(power);
+
+    bool asic_emergency = (chip1_valid && chip1 >= ASIC_EMERGENCY_TEMP) ||
+                          (chip2_valid && chip2 >= ASIC_EMERGENCY_TEMP);
+    bool vr_emergency = vr_valid && vr >= VR_EMERGENCY_TEMP;
+    bool nvs_overheat_mode = nvs_config_get_bool(NVS_CONFIG_OVERHEAT_MODE);
+
+    // 1. Critical Emergency Shutdown (ASIC >= 75 C or VR >= 105 C)
+    if (asic_emergency || vr_emergency) {
+        if (!sys_module->overheat_mode) {
+            if (chip2_valid) {
+                ESP_LOGE(TAG, "OVERHEAT! VR: %.1fC ASIC1: %.1fC ASIC2: %.1fC - entering safe mode (NVS settings preserved)",
+                         vr, chip1, chip2);
+            } else {
+                ESP_LOGE(TAG, "OVERHEAT! VR: %.1fC ASIC: %.1fC - entering safe mode (NVS settings preserved)",
+                         vr, chip1);
+            }
+        }
+        if (GLOBAL_STATE->ASIC_initalized || power_management->actual_voltage_mv > 0) {
+            mining_stop(GLOBAL_STATE);
+            *prev_asic_initialized = GLOBAL_STATE->ASIC_initalized;
+        }
+        power_management->actual_voltage_mv = 0;
+        reset_thermal_throttle_state(power_management);
+        reset_watchdog_state(power_management);
+
+        if (!nvs_overheat_mode) {
+            nvs_config_set_bool(NVS_CONFIG_OVERHEAT_MODE, true);
+        }
+        sys_module->overheat_mode = true;
+        return;
+    }
+
+    // 2. Active Overheat Latch / Safe Resume Check
+    if (sys_module->overheat_mode) {
+        if (!nvs_overheat_mode) {
+            // While ASIC is powered down, Thermal_get_chip_temp() returns -1 (invalid).
+            // Check every valid sensor reading against safe recovery limits before restarting.
+            bool asic_safe_for_resume = (!chip1_valid || chip1 < ASIC_SAFE_RECOVERY_TEMP) &&
+                                        (!chip2_valid || chip2 < ASIC_SAFE_RECOVERY_TEMP);
+            bool vr_safe_for_resume = (!vr_valid || vr < VR_SAFE_RECOVERY_TEMP);
+
+            if (asic_safe_for_resume && vr_safe_for_resume) {
+                ESP_LOGI(TAG, "Overheat mode cleared and temperatures safe (VR: %.1fC). Resuming mining at user target (%.1f MHz / %u mV)",
+                         vr, power_management->target_frequency, power_management->target_voltage);
+                reset_thermal_throttle_state(power_management);
+                reset_watchdog_state(power_management);
+                sys_module->overheat_mode = false;
+                mining_start(GLOBAL_STATE);
+                *prev_asic_initialized = GLOBAL_STATE->ASIC_initalized;
+            }
+        } else if (GLOBAL_STATE->ASIC_initalized || power_management->actual_voltage_mv > 0) {
+            mining_stop(GLOBAL_STATE);
+            *prev_asic_initialized = GLOBAL_STATE->ASIC_initalized;
+        }
+        return;
+    }
+
+    if (nvs_overheat_mode) {
+        ESP_LOGW(TAG, "Overheat mode enabled via NVS - stopping mining");
+        sys_module->overheat_mode = true;
+        if (GLOBAL_STATE->ASIC_initalized || power_management->actual_voltage_mv > 0) {
+            mining_stop(GLOBAL_STATE);
+            *prev_asic_initialized = GLOBAL_STATE->ASIC_initalized;
+        }
+        reset_thermal_throttle_state(power_management);
+        return;
+    }
+
+    // 3. Soft-Throttling Zone (ASIC >= 68 C, VR >= 90 C, or Power > 32 W)
+    bool asic_soft = (chip1_valid && chip1 >= ASIC_SOFT_THROTTLE_TEMP) ||
+                     (chip2_valid && chip2 >= ASIC_SOFT_THROTTLE_TEMP);
+    bool vr_soft = vr_valid && vr >= VR_SOFT_THROTTLE_TEMP;
+    bool power_over = power_valid && power > MAX_POWER_W;
+
+    if (asic_soft || vr_soft || power_over) {
+        bool was_throttle_active = power_management->throttle_active;
+        power_management->throttle_active = true;
+        power_management->safe_zone_since_us = 0;
+
+        if (!was_throttle_active || power_management->last_throttle_step_us == 0) {
+            power_management->last_throttle_step_us = now_us;
+            ESP_LOGW(TAG, "Soft-throttling activated (ASIC: %.1fC, VR: %.1fC, Power: %.1fW) - fan forced to 100%% in RAM",
+                     chip1, vr, power);
+            return;
+        }
+
+        if ((now_us - power_management->last_throttle_step_us) >= THROTTLE_STEP_INTERVAL_US) {
+            bool asic_severe = (chip1_valid && chip1 >= ASIC_SEVERE_THROTTLE_TEMP) ||
+                               (chip2_valid && chip2 >= ASIC_SEVERE_THROTTLE_TEMP);
+            bool vr_severe = vr_valid && vr >= VR_SEVERE_THROTTLE_TEMP;
+            float freq_step = (asic_severe || vr_severe) ? THROTTLE_SEVERE_FREQ_STEP_MHZ : THROTTLE_FREQ_STEP_MHZ;
+
+            float max_freq_offset = fmaxf(0.0f, power_management->target_frequency - power_management->watchdog_freq_offset_mhz - FREQ_MIN_MHZ);
+            power_management->thermal_offset_mhz = fminf(max_freq_offset, power_management->thermal_offset_mhz + freq_step);
+
+            uint16_t clamped_target_vcore = clamp_vcore_mv(power_management->target_voltage);
+            uint16_t max_vcore_offset = (clamped_target_vcore > VCORE_MIN_MV) ? (clamped_target_vcore - VCORE_MIN_MV) : 0;
+            uint32_t next_vcore_offset = (uint32_t) power_management->thermal_offset_mv + THROTTLE_VCORE_STEP_MV;
+            power_management->thermal_offset_mv = (next_vcore_offset > max_vcore_offset)
+                                                      ? max_vcore_offset
+                                                      : (uint16_t) next_vcore_offset;
+
+            power_management->last_throttle_step_us = now_us;
+
+            float eff_freq = calculate_effective_frequency(power_management->target_frequency,
+                                                           power_management->watchdog_freq_offset_mhz + power_management->thermal_offset_mhz);
+            uint16_t eff_vcore = calculate_effective_voltage(power_management->target_voltage,
+                                                             power_management->thermal_offset_mv);
+            ESP_LOGW(TAG, "Soft-throttling step-down (ASIC: %.1fC, VR: %.1fC, Power: %.1fW) -> %.1f MHz / %u mV",
+                     chip1, vr, power, eff_freq, eff_vcore);
+        }
+        return;
+    }
+
+    // 4. Hysteresis Recovery Zone (ASIC < 65 C, VR < 85 C, Power <= 32 W continuously for 30 s)
+    if (power_management->throttle_active) {
+        bool asic_safe = (chip1_valid || chip2_valid) &&
+                         (!chip1_valid || chip1 < ASIC_SAFE_RECOVERY_TEMP) &&
+                         (!chip2_valid || chip2 < ASIC_SAFE_RECOVERY_TEMP);
+        bool vr_safe = !isnan(vr) && (!GLOBAL_STATE->DEVICE_CONFIG.TPS546 || vr > 0.0f) && vr < VR_SAFE_RECOVERY_TEMP;
+        bool power_safe = power_valid && power <= MAX_POWER_W;
+
+        if (!(asic_safe && vr_safe && power_safe)) {
+            power_management->safe_zone_since_us = 0;
+            return;
+        }
+
+        if (power_management->safe_zone_since_us == 0) {
+            power_management->safe_zone_since_us = now_us;
+            ESP_LOGI(TAG, "Entered thermal safe zone (ASIC: %.1fC, VR: %.1fC, Power: %.1fW) - waiting 30s hysteresis",
+                     chip1, vr, power);
+            return;
+        }
+
+        if ((now_us - power_management->safe_zone_since_us) >= RECOVERY_HOLD_US &&
+            (now_us - power_management->last_throttle_step_us) >= RECOVERY_STEP_INTERVAL_US) {
+            power_management->thermal_offset_mhz = fmaxf(0.0f, power_management->thermal_offset_mhz - THROTTLE_FREQ_STEP_MHZ);
+            if (power_management->thermal_offset_mv > THROTTLE_VCORE_STEP_MV) {
+                power_management->thermal_offset_mv -= THROTTLE_VCORE_STEP_MV;
+            } else {
+                power_management->thermal_offset_mv = 0;
+            }
+            power_management->last_throttle_step_us = now_us;
+
+            if (power_management->thermal_offset_mhz <= 0.0f && power_management->thermal_offset_mv == 0) {
+                reset_thermal_throttle_state(power_management);
+                ESP_LOGI(TAG, "Thermal throttling cleared: restored to target %.1f MHz / %u mV",
+                         power_management->target_frequency, power_management->target_voltage);
+            } else {
+                float eff_freq = calculate_effective_frequency(power_management->target_frequency,
+                                                               power_management->watchdog_freq_offset_mhz + power_management->thermal_offset_mhz);
+                uint16_t eff_vcore = calculate_effective_voltage(power_management->target_voltage,
+                                                                 power_management->thermal_offset_mv);
+                ESP_LOGI(TAG, "Thermal recovery step-up -> %.1f MHz / %u mV (offsets: -%.1f MHz / -%u mV)",
+                         eff_freq, eff_vcore, power_management->thermal_offset_mhz, power_management->thermal_offset_mv);
+            }
+        }
+    }
+}
+
 void POWER_MANAGEMENT_task(void * pvParameters)
 {
     ESP_LOGI(TAG, "Starting");
@@ -186,16 +484,19 @@ void POWER_MANAGEMENT_task(void * pvParameters)
     PowerManagementModule * power_management = &GLOBAL_STATE->POWER_MANAGEMENT_MODULE;
     SystemModule * sys_module = &GLOBAL_STATE->SYSTEM_MODULE;
 
+    power_management->target_frequency = nvs_config_get_float(NVS_CONFIG_ASIC_FREQUENCY);
+    power_management->target_voltage = GLOBAL_STATE->SELF_TEST_MODULE.is_active
+                                           ? GLOBAL_STATE->DEVICE_CONFIG.family.asic.default_voltage_mv
+                                           : nvs_config_get_u16(NVS_CONFIG_ASIC_VOLTAGE);
+    power_management->actual_voltage_mv = 0;
+    reset_thermal_throttle_state(power_management);
+
     POWER_MANAGEMENT_init_frequency(GLOBAL_STATE);
 
-    float last_nvs_asic_frequency = nvs_config_get_float(NVS_CONFIG_ASIC_FREQUENCY);
+    float last_nvs_asic_frequency = power_management->target_frequency;
     bool prev_asic_initialized = GLOBAL_STATE->ASIC_initalized;
 
     vTaskDelay(500 / portTICK_PERIOD_MS);
-    uint16_t last_core_voltage = 0.0;
-
-    uint16_t last_known_asic_voltage = 0;
-    float last_known_asic_frequency = 0.0;
     bool is_paused = false;
 
     while (1) {
@@ -219,6 +520,22 @@ void POWER_MANAGEMENT_task(void * pvParameters)
         power_management->chip_temp2_avg = Thermal_get_chip_temp2(GLOBAL_STATE);
 
         power_management->vr_temp = Power_get_vreg_temp(GLOBAL_STATE);
+
+        uint16_t raw_target_voltage = GLOBAL_STATE->SELF_TEST_MODULE.is_active
+                                          ? GLOBAL_STATE->DEVICE_CONFIG.family.asic.default_voltage_mv
+                                          : nvs_config_get_u16(NVS_CONFIG_ASIC_VOLTAGE);
+        float raw_target_frequency = nvs_config_get_float(NVS_CONFIG_ASIC_FREQUENCY);
+        power_management->target_voltage = raw_target_voltage;
+        power_management->target_frequency = raw_target_frequency;
+
+        if (fabsf(raw_target_frequency - last_nvs_asic_frequency) > 0.001f) {
+            ESP_LOGI(TAG, "New ASIC target frequency requested: %g MHz (previous NVS: %g MHz)",
+                     raw_target_frequency, last_nvs_asic_frequency);
+            reset_watchdog_state(power_management);
+            last_nvs_asic_frequency = raw_target_frequency;
+        }
+        clamp_thermal_offsets_to_headroom(power_management);
+
         // User pause, hardware fault, or all pools unreachable
         bool wants_stop = sys_module->mining_paused || sys_module->hardware_fault || sys_module->pools_unavailable;
         if (wants_stop && !is_paused) {
@@ -226,9 +543,11 @@ void POWER_MANAGEMENT_task(void * pvParameters)
             is_paused = true;
             prev_asic_initialized = GLOBAL_STATE->ASIC_initalized;
         } else if (!wants_stop && is_paused) {
-            mining_start(GLOBAL_STATE);
+            if (!sys_module->overheat_mode && !nvs_config_get_bool(NVS_CONFIG_OVERHEAT_MODE)) {
+                mining_start(GLOBAL_STATE);
+                prev_asic_initialized = GLOBAL_STATE->ASIC_initalized;
+            }
             is_paused = false;
-            prev_asic_initialized = GLOBAL_STATE->ASIC_initalized;
         }
 
         // If we've paused or have a hardware fault, skip doing anything else
@@ -238,108 +557,10 @@ void POWER_MANAGEMENT_task(void * pvParameters)
             continue;
         }
 
-        bool asic_overheat =
-            power_management->chip_temp_avg > THROTTLE_TEMP
-            || power_management->chip_temp2_avg > THROTTLE_TEMP;
+        handle_thermal_state_machine(GLOBAL_STATE, &prev_asic_initialized);
 
-        if ((power_management->vr_temp > TPS546_THROTTLE_TEMP || asic_overheat) && (power_management->frequency_value > 50 || power_management->voltage > 1000)) {
-            if (power_management->chip_temp2_avg > 0) {
-                ESP_LOGE(TAG, "OVERHEAT! VR: %fC ASIC1: %fC ASIC2: %fC", power_management->vr_temp, power_management->chip_temp_avg, power_management->chip_temp2_avg);
-            } else {
-                ESP_LOGE(TAG, "OVERHEAT! VR: %fC ASIC: %fC", power_management->vr_temp, power_management->chip_temp_avg);
-            }
-
-            last_known_asic_voltage = nvs_config_get_u16(NVS_CONFIG_ASIC_VOLTAGE);
-            last_known_asic_frequency = nvs_config_get_float(NVS_CONFIG_ASIC_FREQUENCY);
-            nvs_config_set_bool(NVS_CONFIG_AUTO_FAN_SPEED, false);
-            nvs_config_set_u16(NVS_CONFIG_MANUAL_FAN_SPEED, 100);
-            nvs_config_set_bool(NVS_CONFIG_OVERHEAT_MODE, true);
-            ESP_LOGW(TAG, "Entering safe mode due to overheat condition. System operation halted.");
-            mining_stop(GLOBAL_STATE);
-            
-            // Note: ASIC temperature readings are invalid when ASIC is powered down (returns -1)
-            // For 600-series boards that use ASIC thermal diode, we rely on VR temp and fixed cooling time
-            // For boards with EMC internal temp sensor, readings remain valid
-            bool asic_temp_valid = GLOBAL_STATE->DEVICE_CONFIG.emc_internal_temp;
-            int cooling_cycles = 0;
-            const int MIN_COOLING_CYCLES = 6; // Minimum 30 seconds cooling
-            
-            while (cooling_cycles < MIN_COOLING_CYCLES || power_management->vr_temp > TPS546_THROTTLE_TEMP - 10) {
-                vTaskDelay(5000 / portTICK_PERIOD_MS); // Wait 5 seconds
-                cooling_cycles++;
-                
-                power_management->vr_temp = Power_get_vreg_temp(GLOBAL_STATE);
-                
-                // Only check ASIC temps if they're valid (not using ASIC thermal diode)
-                if (asic_temp_valid) {
-                    power_management->chip_temp_avg = Thermal_get_chip_temp(GLOBAL_STATE);
-                    power_management->chip_temp2_avg = Thermal_get_chip_temp2(GLOBAL_STATE);
-                    ESP_LOGW(TAG, "Safe mode active (cycle %d) - VR: %.1f°C ASIC1: %.1f°C ASIC2: %.1f°C",
-                             cooling_cycles, power_management->vr_temp, power_management->chip_temp_avg, power_management->chip_temp2_avg);
-                    
-                    // Continue if ASIC temps still too high
-                    if (power_management->chip_temp_avg >  SAFE_TEMP || power_management->chip_temp2_avg > SAFE_TEMP) {
-                        cooling_cycles = 0; // Reset cycle count if still hot
-                    }
-                } else {
-                    // For boards using ASIC thermal diode (600 series), rely on VR temp and time
-                    ESP_LOGW(TAG, "Safe mode active (cycle %d/%d) - VR: %.1f°C (ASIC temps unavailable while powered down)",
-                             cooling_cycles, MIN_COOLING_CYCLES, power_management->vr_temp);
-                }
-            }
-            ESP_LOGI(TAG, "Temperature normalized after %d cooling cycles. Reinitializing ASIC...", cooling_cycles);
-            
-            uint16_t reduced_voltage = last_known_asic_voltage > ASIC_REDUCTION ? last_known_asic_voltage - ASIC_REDUCTION : 1000;
-            float reduced_asic_frequency = last_known_asic_frequency > ASIC_REDUCTION ? last_known_asic_frequency - ASIC_REDUCTION : 400.0;
-            
-            nvs_config_set_u16(NVS_CONFIG_ASIC_VOLTAGE, reduced_voltage);
-            nvs_config_set_float(NVS_CONFIG_ASIC_FREQUENCY, reduced_asic_frequency);
-            
-            ESP_LOGI(TAG, "Restoring at reduced settings: %umV (was %umV), %.0f MHz (was %.0f MHz)",
-                     reduced_voltage, last_known_asic_voltage, reduced_asic_frequency, last_known_asic_frequency);
-
-            reset_watchdog_state(power_management);
-            uint8_t chip_count = mining_start(GLOBAL_STATE);
-            prev_asic_initialized = GLOBAL_STATE->ASIC_initalized;
-
-            if (chip_count > 0) {
-                last_nvs_asic_frequency = reduced_asic_frequency;
-                nvs_config_set_bool(NVS_CONFIG_OVERHEAT_MODE, false);
-                ESP_LOGI(TAG, "Resuming normal operation. Reduced frequency (%.0f MHz) will be applied automatically.", reduced_asic_frequency);
-            }
-        }
-
-        uint16_t core_voltage = GLOBAL_STATE->SELF_TEST_MODULE.is_active
-                                 ? GLOBAL_STATE->DEVICE_CONFIG.family.asic.default_voltage_mv
-                                 : nvs_config_get_u16(NVS_CONFIG_ASIC_VOLTAGE);
-        float asic_frequency = nvs_config_get_float(NVS_CONFIG_ASIC_FREQUENCY);
-
-        if (core_voltage != last_core_voltage) {
-            ESP_LOGI(TAG, "setting new vcore voltage to %umV", core_voltage);
-            VCORE_set_voltage(GLOBAL_STATE, (double) core_voltage / 1000.0);
-            last_core_voltage = core_voltage;
-        }
-
-        if (asic_frequency != last_nvs_asic_frequency) {
-            ESP_LOGI(TAG, "New ASIC frequency requested: %g MHz (current NVS: %g MHz)", asic_frequency, last_nvs_asic_frequency);
-
-            reset_watchdog_state(power_management);
-            power_management->frequency_value = asic_frequency;
-            power_management->expected_hashrate = expected_hashrate(GLOBAL_STATE);
-
-            ASIC_set_frequency(GLOBAL_STATE);
-            ASIC_set_nonce_space(GLOBAL_STATE);
-
-            power_management->last_freq_change_us = esp_timer_get_time();
-            last_nvs_asic_frequency = asic_frequency;
-        }
-
-        // Check for changing of overheat mode
-        bool new_overheat_mode = nvs_config_get_bool(NVS_CONFIG_OVERHEAT_MODE);
-        
-        if (new_overheat_mode != sys_module->overheat_mode) {
-            sys_module->overheat_mode = new_overheat_mode;
-            ESP_LOGI(TAG, "Overheat mode updated to: %d", sys_module->overheat_mode);
+        if (!sys_module->overheat_mode) {
+            apply_effective_power_and_freq(GLOBAL_STATE);
         }
 
         VCORE_check_fault(GLOBAL_STATE);

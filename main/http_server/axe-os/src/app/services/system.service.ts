@@ -168,6 +168,13 @@ export class SystemApiService {
         coinbaseValueTotalSatoshis: 50,
         coinbaseValueUserSatoshis: 50,
         miningPaused: false,
+        throttleActive: 0,
+        targetFrequency: 485,
+        targetVoltage: 1200,
+        vdroopOffsetMv: 0,
+        dvfsProfile: 0,
+        cmlErrorCount: 0,
+        watchdogResets: 0,
       }
     ).pipe(delay(1000));
   }

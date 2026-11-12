@@ -47,6 +47,44 @@
 #define WATCHDOG_MIN_FREQ_MHZ       FREQ_MIN_MHZ
 #define WATCHDOG_RECOVERY_DELAY_MS  2000
 
+// Slow-loop Vdroop compensation
+#define VDROOP_CHECK_INTERVAL_US       (10LL * 1000000LL)
+#define VDROOP_FREQ_SETTLE_US          (10LL * 1000000LL)
+#define VDROOP_STEP_MV                 5
+#define VDROOP_MAX_OFFSET_MV           20
+#define VDROOP_DEADBAND_MV             5.0f
+#define VDROOP_VALID_VOLTAGE_MIN_MV    500.0f
+
+// DVFS profiles and Auto-Tuner envelopes
+#define DVFS_STEP_INTERVAL_US          (60LL * 1000000LL)
+#define DVFS_FREQ_STEP_MHZ             12.5f
+#define DVFS_VCORE_STEP_DOWN_MV        5
+#define DVFS_VCORE_STEP_UP_MV          10
+
+#define DVFS_EFFICIENCY_MIN_FREQ_MHZ   500.0f
+#define DVFS_EFFICIENCY_MAX_FREQ_MHZ   600.0f
+#define DVFS_EFFICIENCY_MAX_ERROR_PCT  0.5f
+
+#define DVFS_BALANCED_MIN_FREQ_MHZ     525.0f
+#define DVFS_BALANCED_MAX_FREQ_MHZ     625.0f
+#define DVFS_BALANCED_MAX_ERROR_PCT    0.8f
+#define DVFS_BALANCED_MAX_ASIC_TEMP    64.0f
+#define DVFS_BALANCED_MAX_VR_TEMP      80.0f
+
+#define DVFS_PERFORMANCE_MIN_FREQ_MHZ  550.0f
+#define DVFS_PERFORMANCE_MAX_FREQ_MHZ  675.0f
+#define DVFS_PERFORMANCE_MAX_ERROR_PCT 1.0f
+#define DVFS_PERFORMANCE_MAX_ASIC_TEMP 68.0f
+#define DVFS_PERFORMANCE_MAX_VR_TEMP   90.0f
+#define DVFS_PERFORMANCE_MAX_POWER_W   31.0f
+
+typedef enum {
+    DVFS_PROFILE_MANUAL = 0,
+    DVFS_PROFILE_EFFICIENCY = 1,
+    DVFS_PROFILE_BALANCED = 2,
+    DVFS_PROFILE_PERFORMANCE = 3,
+} DvfsProfile;
+
 static const char * TAG = "power_management";
 
 static bool is_valid_temp(float temp)
@@ -54,7 +92,21 @@ static bool is_valid_temp(float temp)
     return !isnan(temp) && temp > 0.0f;
 }
 
-static uint16_t clamp_vcore_mv(uint16_t voltage_mv)
+static bool is_vr_temp_valid(const GlobalState * GLOBAL_STATE, float vr)
+{
+    return !isnan(vr) && (!GLOBAL_STATE->DEVICE_CONFIG.TPS546 || vr > 0.0f);
+}
+
+static bool are_asic_temps_below(float chip1, float chip2, float limit)
+{
+    bool chip1_valid = is_valid_temp(chip1);
+    bool chip2_valid = is_valid_temp(chip2);
+    return (chip1_valid || chip2_valid) &&
+           (!chip1_valid || chip1 < limit) &&
+           (!chip2_valid || chip2 < limit);
+}
+
+static uint16_t clamp_vcore_i32(int32_t voltage_mv)
 {
     if (voltage_mv < VCORE_MIN_MV) {
         return VCORE_MIN_MV;
@@ -62,21 +114,84 @@ static uint16_t clamp_vcore_mv(uint16_t voltage_mv)
     if (voltage_mv > VCORE_MAX_MV) {
         return VCORE_MAX_MV;
     }
-    return voltage_mv;
+    return (uint16_t) voltage_mv;
 }
 
-static uint16_t calculate_effective_voltage(uint16_t target_voltage_mv, uint16_t thermal_offset_mv)
+static bool get_dvfs_freq_bounds(uint16_t profile, float * min_freq, float * max_freq)
 {
-    uint16_t clamped_target = clamp_vcore_mv(target_voltage_mv);
-    if (thermal_offset_mv >= clamped_target) {
-        return VCORE_MIN_MV;
+    switch (profile) {
+        case DVFS_PROFILE_EFFICIENCY:
+            *min_freq = DVFS_EFFICIENCY_MIN_FREQ_MHZ;
+            *max_freq = DVFS_EFFICIENCY_MAX_FREQ_MHZ;
+            return true;
+        case DVFS_PROFILE_BALANCED:
+            *min_freq = DVFS_BALANCED_MIN_FREQ_MHZ;
+            *max_freq = DVFS_BALANCED_MAX_FREQ_MHZ;
+            return true;
+        case DVFS_PROFILE_PERFORMANCE:
+            *min_freq = DVFS_PERFORMANCE_MIN_FREQ_MHZ;
+            *max_freq = DVFS_PERFORMANCE_MAX_FREQ_MHZ;
+            return true;
+        default:
+            return false;
     }
-    return clamp_vcore_mv(clamped_target - thermal_offset_mv);
 }
 
-static float calculate_effective_frequency(float target_freq, float offset_mhz)
+static float get_dvfs_base_target_freq(const PowerManagementModule * power_management)
 {
-    return fmaxf(FREQ_MIN_MHZ, target_freq - offset_mhz);
+    float min_freq = FREQ_MIN_MHZ;
+    float max_freq = DVFS_PERFORMANCE_MAX_FREQ_MHZ;
+    float raw_freq = power_management->target_frequency + power_management->dvfs_freq_offset_mhz;
+
+    if (!get_dvfs_freq_bounds(power_management->dvfs_profile, &min_freq, &max_freq)) {
+        return power_management->target_frequency;
+    }
+
+    if (raw_freq < min_freq) {
+        return min_freq;
+    }
+    if (raw_freq > max_freq) {
+        return max_freq;
+    }
+    return raw_freq;
+}
+
+static uint16_t get_dvfs_base_target_voltage_mv(const PowerManagementModule * power_management)
+{
+    return clamp_vcore_i32((int32_t) power_management->target_voltage +
+                           (int32_t) power_management->dvfs_voltage_offset_mv);
+}
+
+static uint16_t get_base_voltage_mv(const PowerManagementModule * power_management)
+{
+    uint16_t dvfs_target_mv = get_dvfs_base_target_voltage_mv(power_management);
+    return clamp_vcore_i32((int32_t) dvfs_target_mv - (int32_t) power_management->thermal_offset_mv);
+}
+
+static uint16_t get_effective_voltage_mv(const PowerManagementModule * power_management)
+{
+    uint16_t base_voltage_mv = get_base_voltage_mv(power_management);
+    return clamp_vcore_i32((int32_t) base_voltage_mv + (int32_t) power_management->vdroop_offset_mv);
+}
+
+static float get_effective_frequency_mhz(const PowerManagementModule * power_management)
+{
+    float base_target_freq = get_dvfs_base_target_freq(power_management);
+    float total_offset = power_management->watchdog_freq_offset_mhz + power_management->thermal_offset_mhz;
+    return fmaxf(FREQ_MIN_MHZ, base_target_freq - total_offset);
+}
+
+static void reset_dvfs_state(PowerManagementModule * power_management, int64_t now_us)
+{
+    power_management->dvfs_freq_offset_mhz = 0.0f;
+    power_management->dvfs_voltage_offset_mv = 0;
+    power_management->last_dvfs_step_us = now_us;
+}
+
+static void reset_vdroop_state(PowerManagementModule * power_management)
+{
+    power_management->vdroop_offset_mv = 0;
+    power_management->last_vdroop_check_us = 0;
 }
 
 static void reset_thermal_throttle_state(PowerManagementModule * power_management)
@@ -104,6 +219,7 @@ static void mining_stop(GlobalState * GLOBAL_STATE)
     // Cut ASIC power and hold in reset
     VCORE_set_voltage(GLOBAL_STATE, 0.0f);
     GLOBAL_STATE->POWER_MANAGEMENT_MODULE.actual_voltage_mv = 0;
+    reset_vdroop_state(&GLOBAL_STATE->POWER_MANAGEMENT_MODULE);
     asic_hold_reset_low();
 
     // Mark uninitialized immediately so tasks stop issuing UART commands
@@ -129,7 +245,7 @@ static uint8_t mining_start(GlobalState * GLOBAL_STATE)
                                   : nvs_config_get_u16(NVS_CONFIG_ASIC_VOLTAGE);
     power_management->target_voltage = target_voltage;
 
-    uint16_t effective_voltage_mv = calculate_effective_voltage(target_voltage, power_management->thermal_offset_mv);
+    uint16_t effective_voltage_mv = get_effective_voltage_mv(power_management);
     VCORE_set_voltage(GLOBAL_STATE, (double) effective_voltage_mv / 1000.0);
     power_management->actual_voltage_mv = effective_voltage_mv;
 
@@ -146,7 +262,9 @@ static uint8_t mining_start(GlobalState * GLOBAL_STATE)
     uint8_t chip_count = asic_initialize(GLOBAL_STATE, ASIC_INIT_RECOVERY, 2000);
 
     if (chip_count > 0) {
-        GLOBAL_STATE->POWER_MANAGEMENT_MODULE.last_freq_change_us = esp_timer_get_time();
+        int64_t now_us = esp_timer_get_time();
+        GLOBAL_STATE->POWER_MANAGEMENT_MODULE.last_freq_change_us = now_us;
+        GLOBAL_STATE->POWER_MANAGEMENT_MODULE.last_dvfs_step_us = now_us;
         ESP_LOGI(TAG, "Mining started successfully (%d chip(s))", chip_count);
     } else {
         ESP_LOGE(TAG, "Mining start failed - ASIC not detected");
@@ -190,18 +308,16 @@ static void handle_asic_watchdog(GlobalState * GLOBAL_STATE)
     }
 
     if (power_management->watchdog_consecutive_failures >= 2) {
-        float nvs_freq = nvs_config_get_float(NVS_CONFIG_ASIC_FREQUENCY);
-        if (nvs_freq > WATCHDOG_MIN_FREQ_MHZ) {
-            float max_offset = nvs_freq - WATCHDOG_MIN_FREQ_MHZ;
+        float base_freq = get_dvfs_base_target_freq(power_management);
+        if (base_freq > WATCHDOG_MIN_FREQ_MHZ) {
+            float max_offset = base_freq - WATCHDOG_MIN_FREQ_MHZ;
             power_management->watchdog_freq_offset_mhz = fminf(
                 max_offset,
                 power_management->watchdog_freq_offset_mhz + WATCHDOG_FREQ_STEP_DOWN_MHZ);
         }
-        float effective_freq = calculate_effective_frequency(
-            nvs_freq,
-            power_management->watchdog_freq_offset_mhz + power_management->thermal_offset_mhz);
+        float effective_freq = get_effective_frequency_mhz(power_management);
         ESP_LOGW(TAG, "ASIC Watchdog Level 2 (failure %u/3 in <10 min): RAM step-down to %.1f MHz (NVS %.1f MHz unchanged)",
-                 power_management->watchdog_consecutive_failures, effective_freq, nvs_freq);
+                 power_management->watchdog_consecutive_failures, effective_freq, power_management->target_frequency);
     } else {
         ESP_LOGW(TAG, "ASIC Watchdog Level 1 (failure 1/3): soft re-init of ASIC");
     }
@@ -218,10 +334,16 @@ void POWER_MANAGEMENT_init_frequency(void * pvParameters)
     PowerManagementModule * power_management = &GLOBAL_STATE->POWER_MANAGEMENT_MODULE;
 
     float nvs_freq = nvs_config_get_float(NVS_CONFIG_ASIC_FREQUENCY);
+    uint16_t dvfs_profile = GLOBAL_STATE->SELF_TEST_MODULE.is_active
+                                ? DVFS_PROFILE_MANUAL
+                                : nvs_config_get_u16(NVS_CONFIG_DVFS_PROFILE);
+    if (dvfs_profile > DVFS_PROFILE_PERFORMANCE) {
+        dvfs_profile = DVFS_PROFILE_MANUAL;
+    }
     power_management->target_frequency = nvs_freq;
+    power_management->dvfs_profile = dvfs_profile;
 
-    float total_offset = power_management->watchdog_freq_offset_mhz + power_management->thermal_offset_mhz;
-    float frequency = calculate_effective_frequency(nvs_freq, total_offset);
+    float frequency = get_effective_frequency_mhz(power_management);
 
     power_management->frequency_value = frequency;
     power_management->actual_frequency = 50.0;
@@ -235,13 +357,14 @@ void POWER_MANAGEMENT_init_frequency(void * pvParameters)
 
 static void clamp_thermal_offsets_to_headroom(PowerManagementModule * power_management)
 {
-    uint16_t clamped_target_vcore = clamp_vcore_mv(power_management->target_voltage);
+    uint16_t clamped_target_vcore = get_dvfs_base_target_voltage_mv(power_management);
     uint16_t max_vcore_offset = (clamped_target_vcore > VCORE_MIN_MV) ? (clamped_target_vcore - VCORE_MIN_MV) : 0;
     if (power_management->thermal_offset_mv > max_vcore_offset) {
         power_management->thermal_offset_mv = max_vcore_offset;
     }
 
-    float max_freq_offset = fmaxf(0.0f, power_management->target_frequency - power_management->watchdog_freq_offset_mhz - FREQ_MIN_MHZ);
+    float base_target_freq = get_dvfs_base_target_freq(power_management);
+    float max_freq_offset = fmaxf(0.0f, base_target_freq - power_management->watchdog_freq_offset_mhz - FREQ_MIN_MHZ);
     if (power_management->thermal_offset_mhz > max_freq_offset) {
         power_management->thermal_offset_mhz = max_freq_offset;
     }
@@ -254,8 +377,9 @@ static void apply_effective_voltage(GlobalState * GLOBAL_STATE, uint16_t effecti
         return;
     }
 
-    ESP_LOGI(TAG, "Setting VCore to %umV (target: %umV, thermal offset: -%umV)",
-             effective_voltage_mv, power_management->target_voltage, power_management->thermal_offset_mv);
+    ESP_LOGI(TAG, "Setting VCore to %umV (target: %umV, dvfs: %+dmV, thermal: -%umV, vdroop: +%umV)",
+             effective_voltage_mv, power_management->target_voltage, power_management->dvfs_voltage_offset_mv,
+             power_management->thermal_offset_mv, power_management->vdroop_offset_mv);
     VCORE_set_voltage(GLOBAL_STATE, (double) effective_voltage_mv / 1000.0);
     power_management->actual_voltage_mv = effective_voltage_mv;
 }
@@ -271,8 +395,8 @@ static void apply_effective_frequency(GlobalState * GLOBAL_STATE, float effectiv
     power_management->expected_hashrate = expected_hashrate(GLOBAL_STATE);
 
     if (GLOBAL_STATE->ASIC_initalized) {
-        ESP_LOGI(TAG, "Setting ASIC frequency to %g MHz (target: %g MHz, thermal: -%g MHz, watchdog: -%g MHz)",
-                 effective_freq_mhz, power_management->target_frequency,
+        ESP_LOGI(TAG, "Setting ASIC frequency to %g MHz (target: %g MHz, dvfs: %+g MHz, thermal: -%g MHz, watchdog: -%g MHz)",
+                 effective_freq_mhz, power_management->target_frequency, power_management->dvfs_freq_offset_mhz,
                  power_management->thermal_offset_mhz, power_management->watchdog_freq_offset_mhz);
         ASIC_set_frequency(GLOBAL_STATE);
         ASIC_set_nonce_space(GLOBAL_STATE);
@@ -284,11 +408,8 @@ static void apply_effective_power_and_freq(GlobalState * GLOBAL_STATE)
 {
     PowerManagementModule * power_management = &GLOBAL_STATE->POWER_MANAGEMENT_MODULE;
 
-    uint16_t effective_voltage_mv = calculate_effective_voltage(power_management->target_voltage,
-                                                                power_management->thermal_offset_mv);
-    float total_freq_offset_mhz = power_management->watchdog_freq_offset_mhz + power_management->thermal_offset_mhz;
-    float effective_freq_mhz = calculate_effective_frequency(power_management->target_frequency,
-                                                             total_freq_offset_mhz);
+    uint16_t effective_voltage_mv = get_effective_voltage_mv(power_management);
+    float effective_freq_mhz = get_effective_frequency_mhz(power_management);
 
     // Lower frequency before dropping VCore when stepping down; raise VCore before raising frequency.
     if (effective_freq_mhz < power_management->frequency_value) {
@@ -297,6 +418,165 @@ static void apply_effective_power_and_freq(GlobalState * GLOBAL_STATE)
     } else {
         apply_effective_voltage(GLOBAL_STATE, effective_voltage_mv);
         apply_effective_frequency(GLOBAL_STATE, effective_freq_mhz);
+    }
+}
+
+static void step_dvfs_frequency(PowerManagementModule * power_management, float delta_mhz, float min_freq, float max_freq)
+{
+    float cur_freq = get_dvfs_base_target_freq(power_management);
+    float next_freq = fminf(max_freq, fmaxf(min_freq, cur_freq + delta_mhz));
+    if (fabsf(next_freq - cur_freq) > 0.001f) {
+        power_management->dvfs_freq_offset_mhz = next_freq - power_management->target_frequency;
+        ESP_LOGI(TAG, "DVFS profile %u frequency step -> %.1f MHz (offset: %+.1f MHz)",
+                 power_management->dvfs_profile, next_freq, power_management->dvfs_freq_offset_mhz);
+    }
+}
+
+static void step_dvfs_voltage(PowerManagementModule * power_management, int16_t delta_mv)
+{
+    uint16_t cur_mv = get_dvfs_base_target_voltage_mv(power_management);
+    uint16_t next_mv = clamp_vcore_i32((int32_t) cur_mv + (int32_t) delta_mv);
+    if (next_mv != cur_mv) {
+        power_management->dvfs_voltage_offset_mv = (int16_t) ((int32_t) next_mv - (int32_t) power_management->target_voltage);
+        ESP_LOGI(TAG, "DVFS profile %u VCore step -> %u mV (offset: %+d mV)",
+                 power_management->dvfs_profile, next_mv, power_management->dvfs_voltage_offset_mv);
+    }
+}
+
+static void handle_dvfs_autotuner(GlobalState * GLOBAL_STATE)
+{
+    PowerManagementModule * power_management = &GLOBAL_STATE->POWER_MANAGEMENT_MODULE;
+    SystemModule * sys_module = &GLOBAL_STATE->SYSTEM_MODULE;
+    int64_t now_us = esp_timer_get_time();
+
+    if (power_management->dvfs_profile == DVFS_PROFILE_MANUAL || GLOBAL_STATE->SELF_TEST_MODULE.is_active) {
+        power_management->dvfs_freq_offset_mhz = 0.0f;
+        power_management->dvfs_voltage_offset_mv = 0;
+        power_management->last_dvfs_step_us = now_us;
+        return;
+    }
+
+    if (!GLOBAL_STATE->ASIC_initalized || sys_module->overheat_mode || power_management->throttle_active) {
+        power_management->last_dvfs_step_us = now_us;
+        return;
+    }
+
+    if (power_management->last_dvfs_step_us <= 0) {
+        power_management->last_dvfs_step_us = now_us;
+        return;
+    }
+
+    if ((now_us - power_management->last_dvfs_step_us) < DVFS_STEP_INTERVAL_US) {
+        return;
+    }
+    power_management->last_dvfs_step_us = now_us;
+
+    float err_pct = isnan(sys_module->error_percentage) ? 0.0f : sys_module->error_percentage;
+    float chip1 = power_management->chip_temp_avg;
+    float chip2 = power_management->chip_temp2_avg;
+    float vr = power_management->vr_temp;
+    float power = power_management->power;
+    bool vr_valid = is_vr_temp_valid(GLOBAL_STATE, vr);
+    bool power_valid = !isnan(power);
+
+    switch (power_management->dvfs_profile) {
+        case DVFS_PROFILE_EFFICIENCY: {
+            if (err_pct <= DVFS_EFFICIENCY_MAX_ERROR_PCT) {
+                step_dvfs_voltage(power_management, -DVFS_VCORE_STEP_DOWN_MV);
+            } else if (power_valid && power <= MAX_POWER_W) {
+                step_dvfs_voltage(power_management, DVFS_VCORE_STEP_UP_MV);
+            }
+            break;
+        }
+        case DVFS_PROFILE_BALANCED: {
+            bool asic_cool = are_asic_temps_below(chip1, chip2, DVFS_BALANCED_MAX_ASIC_TEMP);
+            bool vr_cool = vr_valid && vr < DVFS_BALANCED_MAX_VR_TEMP;
+            bool power_ok = power_valid && power <= MAX_POWER_W;
+
+            if (err_pct > DVFS_BALANCED_MAX_ERROR_PCT) {
+                step_dvfs_frequency(power_management, -DVFS_FREQ_STEP_MHZ,
+                                    DVFS_BALANCED_MIN_FREQ_MHZ, DVFS_BALANCED_MAX_FREQ_MHZ);
+            } else if (asic_cool && vr_cool && power_ok) {
+                step_dvfs_frequency(power_management, DVFS_FREQ_STEP_MHZ,
+                                    DVFS_BALANCED_MIN_FREQ_MHZ, DVFS_BALANCED_MAX_FREQ_MHZ);
+            }
+            break;
+        }
+        case DVFS_PROFILE_PERFORMANCE: {
+            bool asic_cool = are_asic_temps_below(chip1, chip2, DVFS_PERFORMANCE_MAX_ASIC_TEMP);
+            bool vr_cool = vr_valid && vr < DVFS_PERFORMANCE_MAX_VR_TEMP;
+            bool power_ok = power_valid && power < DVFS_PERFORMANCE_MAX_POWER_W;
+            uint16_t cur_mv = get_dvfs_base_target_voltage_mv(power_management);
+
+            if (err_pct > DVFS_PERFORMANCE_MAX_ERROR_PCT) {
+                if (cur_mv < VCORE_MAX_MV && power_ok) {
+                    step_dvfs_voltage(power_management, DVFS_VCORE_STEP_UP_MV);
+                } else {
+                    step_dvfs_frequency(power_management, -DVFS_FREQ_STEP_MHZ,
+                                        DVFS_PERFORMANCE_MIN_FREQ_MHZ, DVFS_PERFORMANCE_MAX_FREQ_MHZ);
+                }
+            } else if (asic_cool && vr_cool && power_ok) {
+                step_dvfs_frequency(power_management, DVFS_FREQ_STEP_MHZ,
+                                    DVFS_PERFORMANCE_MIN_FREQ_MHZ, DVFS_PERFORMANCE_MAX_FREQ_MHZ);
+            }
+            break;
+        }
+        default:
+            break;
+    }
+}
+
+static void handle_vdroop_compensation(GlobalState * GLOBAL_STATE)
+{
+    PowerManagementModule * power_management = &GLOBAL_STATE->POWER_MANAGEMENT_MODULE;
+    SystemModule * sys_module = &GLOBAL_STATE->SYSTEM_MODULE;
+
+    if (!GLOBAL_STATE->ASIC_initalized || GLOBAL_STATE->SELF_TEST_MODULE.is_active ||
+        sys_module->overheat_mode || power_management->throttle_active) {
+        return;
+    }
+
+    if (isnan(power_management->core_voltage) ||
+        power_management->core_voltage <= VDROOP_VALID_VOLTAGE_MIN_MV) {
+        return;
+    }
+
+    int64_t now_us = esp_timer_get_time();
+    if (power_management->last_freq_change_us <= 0 ||
+        (now_us - power_management->last_freq_change_us) < VDROOP_FREQ_SETTLE_US) {
+        return;
+    }
+
+    if (power_management->last_vdroop_check_us > 0 &&
+        (now_us - power_management->last_vdroop_check_us) < VDROOP_CHECK_INTERVAL_US) {
+        return;
+    }
+    power_management->last_vdroop_check_us = now_us;
+
+    uint16_t base_voltage_mv = get_base_voltage_mv(power_management);
+    uint16_t max_headroom = (VCORE_MAX_MV > base_voltage_mv) ? (VCORE_MAX_MV - base_voltage_mv) : 0;
+    uint16_t max_vdroop = (max_headroom < VDROOP_MAX_OFFSET_MV) ? max_headroom : VDROOP_MAX_OFFSET_MV;
+    if (power_management->vdroop_offset_mv > max_vdroop) {
+        power_management->vdroop_offset_mv = max_vdroop;
+    }
+
+    if (power_management->core_voltage < ((float) base_voltage_mv - VDROOP_DEADBAND_MV)) {
+        if (!isnan(power_management->power) && power_management->power <= MAX_POWER_W &&
+            power_management->vdroop_offset_mv < max_vdroop) {
+            uint16_t next_offset = power_management->vdroop_offset_mv + VDROOP_STEP_MV;
+            power_management->vdroop_offset_mv = (next_offset > max_vdroop) ? max_vdroop : next_offset;
+            ESP_LOGI(TAG, "Vdroop compensation +%u mV -> offset: +%u mV (measured: %.1f mV, base: %u mV)",
+                     VDROOP_STEP_MV, power_management->vdroop_offset_mv,
+                     power_management->core_voltage, base_voltage_mv);
+        }
+    } else if (power_management->core_voltage > ((float) base_voltage_mv + VDROOP_DEADBAND_MV) &&
+               power_management->vdroop_offset_mv > 0) {
+        power_management->vdroop_offset_mv = (power_management->vdroop_offset_mv >= VDROOP_STEP_MV)
+                                                 ? (power_management->vdroop_offset_mv - VDROOP_STEP_MV)
+                                                 : 0;
+        ESP_LOGI(TAG, "Vdroop compensation -%u mV -> offset: +%u mV (measured: %.1f mV, base: %u mV)",
+                 VDROOP_STEP_MV, power_management->vdroop_offset_mv,
+                 power_management->core_voltage, base_voltage_mv);
     }
 }
 
@@ -338,6 +618,7 @@ static void handle_thermal_state_machine(GlobalState * GLOBAL_STATE, bool * prev
         }
         power_management->actual_voltage_mv = 0;
         reset_thermal_throttle_state(power_management);
+        reset_vdroop_state(power_management);
         reset_watchdog_state(power_management);
 
         if (!nvs_overheat_mode) {
@@ -395,6 +676,9 @@ static void handle_thermal_state_machine(GlobalState * GLOBAL_STATE, bool * prev
         power_management->safe_zone_since_us = 0;
 
         if (!was_throttle_active || power_management->last_throttle_step_us == 0) {
+            if (!was_throttle_active) {
+                reset_vdroop_state(power_management);
+            }
             power_management->last_throttle_step_us = now_us;
             ESP_LOGW(TAG, "Soft-throttling activated (ASIC: %.1fC, VR: %.1fC, Power: %.1fW) - fan forced to 100%% in RAM",
                      chip1, vr, power);
@@ -407,10 +691,11 @@ static void handle_thermal_state_machine(GlobalState * GLOBAL_STATE, bool * prev
             bool vr_severe = vr_valid && vr >= VR_SEVERE_THROTTLE_TEMP;
             float freq_step = (asic_severe || vr_severe) ? THROTTLE_SEVERE_FREQ_STEP_MHZ : THROTTLE_FREQ_STEP_MHZ;
 
-            float max_freq_offset = fmaxf(0.0f, power_management->target_frequency - power_management->watchdog_freq_offset_mhz - FREQ_MIN_MHZ);
+            float max_freq_offset = fmaxf(0.0f, get_dvfs_base_target_freq(power_management) -
+                                                power_management->watchdog_freq_offset_mhz - FREQ_MIN_MHZ);
             power_management->thermal_offset_mhz = fminf(max_freq_offset, power_management->thermal_offset_mhz + freq_step);
 
-            uint16_t clamped_target_vcore = clamp_vcore_mv(power_management->target_voltage);
+            uint16_t clamped_target_vcore = get_dvfs_base_target_voltage_mv(power_management);
             uint16_t max_vcore_offset = (clamped_target_vcore > VCORE_MIN_MV) ? (clamped_target_vcore - VCORE_MIN_MV) : 0;
             uint32_t next_vcore_offset = (uint32_t) power_management->thermal_offset_mv + THROTTLE_VCORE_STEP_MV;
             power_management->thermal_offset_mv = (next_vcore_offset > max_vcore_offset)
@@ -419,10 +704,8 @@ static void handle_thermal_state_machine(GlobalState * GLOBAL_STATE, bool * prev
 
             power_management->last_throttle_step_us = now_us;
 
-            float eff_freq = calculate_effective_frequency(power_management->target_frequency,
-                                                           power_management->watchdog_freq_offset_mhz + power_management->thermal_offset_mhz);
-            uint16_t eff_vcore = calculate_effective_voltage(power_management->target_voltage,
-                                                             power_management->thermal_offset_mv);
+            float eff_freq = get_effective_frequency_mhz(power_management);
+            uint16_t eff_vcore = get_effective_voltage_mv(power_management);
             ESP_LOGW(TAG, "Soft-throttling step-down (ASIC: %.1fC, VR: %.1fC, Power: %.1fW) -> %.1f MHz / %u mV",
                      chip1, vr, power, eff_freq, eff_vcore);
         }
@@ -431,10 +714,8 @@ static void handle_thermal_state_machine(GlobalState * GLOBAL_STATE, bool * prev
 
     // 4. Hysteresis Recovery Zone (ASIC < 65 C, VR < 85 C, Power <= 32 W continuously for 30 s)
     if (power_management->throttle_active) {
-        bool asic_safe = (chip1_valid || chip2_valid) &&
-                         (!chip1_valid || chip1 < ASIC_SAFE_RECOVERY_TEMP) &&
-                         (!chip2_valid || chip2 < ASIC_SAFE_RECOVERY_TEMP);
-        bool vr_safe = !isnan(vr) && (!GLOBAL_STATE->DEVICE_CONFIG.TPS546 || vr > 0.0f) && vr < VR_SAFE_RECOVERY_TEMP;
+        bool asic_safe = are_asic_temps_below(chip1, chip2, ASIC_SAFE_RECOVERY_TEMP);
+        bool vr_safe = is_vr_temp_valid(GLOBAL_STATE, vr) && vr < VR_SAFE_RECOVERY_TEMP;
         bool power_safe = power_valid && power <= MAX_POWER_W;
 
         if (!(asic_safe && vr_safe && power_safe)) {
@@ -462,12 +743,10 @@ static void handle_thermal_state_machine(GlobalState * GLOBAL_STATE, bool * prev
             if (power_management->thermal_offset_mhz <= 0.0f && power_management->thermal_offset_mv == 0) {
                 reset_thermal_throttle_state(power_management);
                 ESP_LOGI(TAG, "Thermal throttling cleared: restored to target %.1f MHz / %u mV",
-                         power_management->target_frequency, power_management->target_voltage);
+                         get_dvfs_base_target_freq(power_management), get_dvfs_base_target_voltage_mv(power_management));
             } else {
-                float eff_freq = calculate_effective_frequency(power_management->target_frequency,
-                                                               power_management->watchdog_freq_offset_mhz + power_management->thermal_offset_mhz);
-                uint16_t eff_vcore = calculate_effective_voltage(power_management->target_voltage,
-                                                                 power_management->thermal_offset_mv);
+                float eff_freq = get_effective_frequency_mhz(power_management);
+                uint16_t eff_vcore = get_effective_voltage_mv(power_management);
                 ESP_LOGI(TAG, "Thermal recovery step-up -> %.1f MHz / %u mV (offsets: -%.1f MHz / -%u mV)",
                          eff_freq, eff_vcore, power_management->thermal_offset_mhz, power_management->thermal_offset_mv);
             }
@@ -490,10 +769,14 @@ void POWER_MANAGEMENT_task(void * pvParameters)
                                            : nvs_config_get_u16(NVS_CONFIG_ASIC_VOLTAGE);
     power_management->actual_voltage_mv = 0;
     reset_thermal_throttle_state(power_management);
+    reset_vdroop_state(power_management);
+    reset_dvfs_state(power_management, esp_timer_get_time());
 
     POWER_MANAGEMENT_init_frequency(GLOBAL_STATE);
 
     float last_nvs_asic_frequency = power_management->target_frequency;
+    uint16_t last_nvs_asic_voltage = power_management->target_voltage;
+    uint16_t last_nvs_dvfs_profile = power_management->dvfs_profile;
     bool prev_asic_initialized = GLOBAL_STATE->ASIC_initalized;
 
     vTaskDelay(500 / portTICK_PERIOD_MS);
@@ -525,14 +808,38 @@ void POWER_MANAGEMENT_task(void * pvParameters)
                                           ? GLOBAL_STATE->DEVICE_CONFIG.family.asic.default_voltage_mv
                                           : nvs_config_get_u16(NVS_CONFIG_ASIC_VOLTAGE);
         float raw_target_frequency = nvs_config_get_float(NVS_CONFIG_ASIC_FREQUENCY);
+        uint16_t raw_dvfs_profile = GLOBAL_STATE->SELF_TEST_MODULE.is_active
+                                        ? DVFS_PROFILE_MANUAL
+                                        : nvs_config_get_u16(NVS_CONFIG_DVFS_PROFILE);
+        if (raw_dvfs_profile > DVFS_PROFILE_PERFORMANCE) {
+            raw_dvfs_profile = DVFS_PROFILE_MANUAL;
+        }
         power_management->target_voltage = raw_target_voltage;
         power_management->target_frequency = raw_target_frequency;
+        power_management->dvfs_profile = raw_dvfs_profile;
 
-        if (fabsf(raw_target_frequency - last_nvs_asic_frequency) > 0.001f) {
+        int64_t now_us = esp_timer_get_time();
+        bool freq_changed = fabsf(raw_target_frequency - last_nvs_asic_frequency) > 0.001f;
+        bool volt_changed = raw_target_voltage != last_nvs_asic_voltage;
+        bool profile_changed = raw_dvfs_profile != last_nvs_dvfs_profile;
+
+        if (freq_changed) {
             ESP_LOGI(TAG, "New ASIC target frequency requested: %g MHz (previous NVS: %g MHz)",
                      raw_target_frequency, last_nvs_asic_frequency);
             reset_watchdog_state(power_management);
             last_nvs_asic_frequency = raw_target_frequency;
+        }
+        if (volt_changed) {
+            ESP_LOGI(TAG, "New ASIC target voltage requested: %u mV (previous NVS: %u mV)",
+                     raw_target_voltage, last_nvs_asic_voltage);
+            last_nvs_asic_voltage = raw_target_voltage;
+        }
+        if (profile_changed) {
+            ESP_LOGI(TAG, "DVFS profile changed: %u -> %u", last_nvs_dvfs_profile, raw_dvfs_profile);
+            last_nvs_dvfs_profile = raw_dvfs_profile;
+        }
+        if (freq_changed || volt_changed || profile_changed) {
+            reset_dvfs_state(power_management, now_us);
         }
         clamp_thermal_offsets_to_headroom(power_management);
 
@@ -553,6 +860,7 @@ void POWER_MANAGEMENT_task(void * pvParameters)
         // If we've paused or have a hardware fault, skip doing anything else
         if (is_paused || sys_module->hardware_fault) {
             power_management->asic_watchdog_trigger = false;
+            power_management->last_dvfs_step_us = now_us;
             vTaskDelay(POLL_RATE / portTICK_PERIOD_MS);
             continue;
         }
@@ -560,7 +868,11 @@ void POWER_MANAGEMENT_task(void * pvParameters)
         handle_thermal_state_machine(GLOBAL_STATE, &prev_asic_initialized);
 
         if (!sys_module->overheat_mode) {
+            handle_dvfs_autotuner(GLOBAL_STATE);
+            handle_vdroop_compensation(GLOBAL_STATE);
             apply_effective_power_and_freq(GLOBAL_STATE);
+        } else {
+            reset_dvfs_state(power_management, esp_timer_get_time());
         }
 
         VCORE_check_fault(GLOBAL_STATE);

@@ -34,6 +34,12 @@ typedef struct
     uint16_t thermal_offset_mv;
     int64_t last_throttle_step_us;
     int64_t safe_zone_since_us;
+    uint16_t vdroop_offset_mv;
+    int64_t last_vdroop_check_us;
+    uint16_t dvfs_profile;
+    float dvfs_freq_offset_mhz;
+    int16_t dvfs_voltage_offset_mv;
+    int64_t last_dvfs_step_us;
 } PowerManagementModule;
 
 void POWER_MANAGEMENT_init_frequency(void * pvParameters);

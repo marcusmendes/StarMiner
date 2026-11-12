@@ -221,6 +221,13 @@ components:
         - hashrateMonitor
         - miningPaused
         - statsLimit
+        - throttleActive
+        - targetFrequency
+        - targetVoltage
+        - vdroopOffsetMv
+        - dvfsProfile
+        - cmlErrorCount
+        - watchdogResets
       properties:
         ASICModel:
           type: string
@@ -562,6 +569,29 @@ components:
         statsLimit:
           type: integer
           description: Maximum number of statistics data points
+        throttleActive:
+          type: integer
+          description: Whether thermal soft-throttling is currently active in RAM (0=no, 1=yes)
+        targetFrequency:
+          type: number
+          description: Configured target ASIC frequency in NVS (MHz)
+        targetVoltage:
+          type: integer
+          description: Configured target ASIC core voltage in NVS (mV)
+        vdroopOffsetMv:
+          type: integer
+          description: Applied slow-loop Vdroop compensation offset in mV
+        dvfsProfile:
+          type: integer
+          minimum: 0
+          maximum: 3
+          description: Active DVFS auto-tuner profile (0=Manual, 1=Efficiency, 2=Balanced, 3=Performance)
+        cmlErrorCount:
+          type: integer
+          description: Number of recovered TPS546 STATUS_CML communication faults
+        watchdogResets:
+          type: integer
+          description: Number of ASIC/domain watchdog recoveries in current session
 
     SystemASIC:
       type: object
@@ -806,6 +836,13 @@ components:
           minimum: 1
           examples:
             - 450
+        dvfsProfile:
+          type: integer
+          description: DVFS auto-tuner profile (0=Manual, 1=Efficiency, 2=Balanced, 3=Performance)
+          minimum: 0
+          maximum: 3
+          examples:
+            - 0
         rotation:
           type: integer
           description: Whether to rotate the screen orientation (0, 90, 180, 270 degrees)

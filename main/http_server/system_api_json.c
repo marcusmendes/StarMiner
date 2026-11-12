@@ -91,6 +91,10 @@ static void system_api_add_telemetry(cJSON *root, GlobalState *g) {
     cJSON_AddFloatToObject(root, "cpuUsage", g->SYSTEM_MODULE.cpu_usage);
     cJSON_AddBoolToObject(root, "miningPaused", g->SYSTEM_MODULE.mining_paused);
     cJSON_AddNumberToObject(root, "overheat_mode", g->SYSTEM_MODULE.overheat_mode ? 1 : 0);
+    cJSON_AddNumberToObject(root, "throttleActive", g->POWER_MANAGEMENT_MODULE.throttle_active ? 1 : 0);
+    cJSON_AddNumberToObject(root, "vdroopOffsetMv", g->POWER_MANAGEMENT_MODULE.vdroop_offset_mv);
+    cJSON_AddNumberToObject(root, "cmlErrorCount", g->POWER_MANAGEMENT_MODULE.cml_error_count);
+    cJSON_AddNumberToObject(root, "watchdogResets", g->POWER_MANAGEMENT_MODULE.watchdog_resets);
     cJSON_AddStringToObject(root, "wifiStatus", g->SYSTEM_MODULE.wifi_status);
 
     int8_t rssi = -90;
@@ -215,8 +219,11 @@ static void system_api_add_config(cJSON *root, GlobalState *g) {
     cJSON_AddNumberToObject(root, "manualFanSpeed", nvs_config_get_u16(NVS_CONFIG_MANUAL_FAN_SPEED));
     cJSON_AddNumberToObject(root, "minFanSpeed", nvs_config_get_u16(NVS_CONFIG_MIN_FAN_SPEED));
     cJSON_AddNumberToObject(root, "temptarget", nvs_config_get_u16(NVS_CONFIG_TEMP_TARGET));
-    cJSON_AddNumberToObject(root, "coreVoltage", nvs_config_get_u16(NVS_CONFIG_ASIC_VOLTAGE));
-    cJSON_AddFloatToObject(root, "frequency", nvs_config_get_float(NVS_CONFIG_ASIC_FREQUENCY));
+    cJSON_AddFloatToObject(root, "targetFrequency", g->POWER_MANAGEMENT_MODULE.target_frequency > 0.0f ? g->POWER_MANAGEMENT_MODULE.target_frequency : nvs_config_get_float(NVS_CONFIG_ASIC_FREQUENCY));
+    cJSON_AddNumberToObject(root, "targetVoltage", g->POWER_MANAGEMENT_MODULE.target_voltage > 0 ? g->POWER_MANAGEMENT_MODULE.target_voltage : nvs_config_get_u16(NVS_CONFIG_ASIC_VOLTAGE));
+    cJSON_AddNumberToObject(root, "coreVoltage", g->POWER_MANAGEMENT_MODULE.actual_voltage_mv > 0 ? g->POWER_MANAGEMENT_MODULE.actual_voltage_mv : nvs_config_get_u16(NVS_CONFIG_ASIC_VOLTAGE));
+    cJSON_AddFloatToObject(root, "frequency", g->POWER_MANAGEMENT_MODULE.frequency_value > 0.0f ? g->POWER_MANAGEMENT_MODULE.frequency_value : nvs_config_get_float(NVS_CONFIG_ASIC_FREQUENCY));
+    cJSON_AddNumberToObject(root, "dvfsProfile", nvs_config_get_u16(NVS_CONFIG_DVFS_PROFILE));
     cJSON_AddNumberToObject(root, "statsFrequency", nvs_config_get_u16(NVS_CONFIG_STATISTICS_FREQUENCY));
     cJSON_AddNumberToObject(root, "statsLimit", MAX_STATISTICS_COUNT);
 }

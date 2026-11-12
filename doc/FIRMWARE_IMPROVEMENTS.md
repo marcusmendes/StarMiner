@@ -233,6 +233,6 @@ Seguindo rigorosamente as convenções do [`AGENTS.md`](../AGENTS.md) (flags boo
 - [x] **Fase 3 (*Soft-Throttling* Térmico em RAM & Emergência Segura):**
   - [x] Implementar *Soft-Throttling* progressivo em RAM (`>= 68 °C` ASIC ou `>= 90 °C` VR) e rampa de recuperação com histerese (`< 65 °C` ASIC e `< 85 °C` VR por `30 s`).
   - [x] Garantir que a parada de emergência crítica (`>= 75 °C` ASIC ou `>= 105 °C` VR) acione `mining_stop()` e `overheat_mode = 1` **sem sobrescrever** tensão, frequência e modo do fan na NVS.
-- [ ] **Fase 4 (*Vdroop*, Auto-Tuner DVFS & API/UI `AxeOS`):**
-  - [ ] Implementar compensação de *Vdroop* em malha lenta (teto `+20 mV`) e perfis DVFS (`Manual`, `Eficiência`, `Equilibrado`, `Performance`).
-  - [ ] Atualizar [`system_api_json.c`](../main/http_server/system_api_json.c), [`http_server.c`](../main/http_server/http_server.c), [`openapi.yaml`](../main/http_server/axe-os/openapi.yaml), regenerar API (`npm run generate:api`), atualizar mocks em [`system.service.ts`](../main/http_server/axe-os/src/app/services/system.service.ts) e validar com `npm run test:ci` e `idf.py build`.
+- [x] **Fase 4 (*Vdroop*, Auto-Tuner DVFS & API/UI `AxeOS`):**
+  - [x] Implementar compensação de *Vdroop* em malha lenta (teto `+20 mV`) e perfis DVFS (`Manual`, `Eficiência`, `Equilibrado`, `Performance`).
+  - [x] Atualizar [`system_api_json.c`](../main/http_server/system_api_json.c), [`http_server.c`](../main/http_server/http_server.c), [`openapi.yaml`](../main/http_server/axe-os/openapi.yaml), regenerar API (`npm run generate:api`), atualizar mocks em [`system.service.ts`](../main/http_server/axe-os/src/app/services/system.service.ts) e validar com `npm run test:ci` e `idf.py build`.

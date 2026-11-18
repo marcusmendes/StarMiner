@@ -42,3 +42,4 @@ devices.txt
 
 # Firmware and NVS backups
 bitaxe-backup/
+backups/

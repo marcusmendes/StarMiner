@@ -28,7 +28,10 @@ Leitura coletada via `GET /api/system/info` no dispositivo em operação (`192.1
 
 ### 2.1. Divergência entre o repositório público e a build de fábrica da placa
 * A placa roda **`V1.0.1-rc.10`** (`model: "LT-001"`, `boardVersion: "601a-4"`, `ESP-IDF v5.5.2`), contendo recursos não presentes neste repositório (`master` em `3bf9c3e`), como `selfTestParams` e o histórico `error-code`.
-* **Regra obrigatória:** nunca gravar firmware compilado aqui sem antes fazer **backup completo da flash (16 MB) e da partição NVS (`24 KB`)** via USB-C.
+* **Regra obrigatória:** nunca gravar firmware compilado aqui sem antes capturar a telemetria HTTP original e realizar o **backup completo da flash (16 MB) e da partição NVS (`24 KB`)** via USB-C utilizando [`scripts/backup_and_verify_gamma_v2.sh`](../scripts/backup_and_verify_gamma_v2.sh):
+  * Snapshot HTTP de fábrica (`V1.0.1-rc.10`, preservando `selfTestParams` e `error-code`): `./scripts/backup_and_verify_gamma_v2.sh backup-http 192.168.1.108`
+  * Backup binário completo (`nvs` `0x9000`/`0x6000`, `otadata` `0xf10000`/`0x2000` e Flash 16 MB `0x0`/`0x1000000` + `SHA256SUMS`): `./scripts/backup_and_verify_gamma_v2.sh backup-flash <porta_serial>`
+  * Auditoria pós-flash (`boardVersion == "601a-4"`, `freeHeapInternal >= 110000`, ausência de `power_fault` e presença dos 7 campos da Fase 4): `./scripts/backup_and_verify_gamma_v2.sh verify-post-flash 192.168.1.108`
 
 ### 2.2. Bug de reconhecimento da placa em `main/device_config.h` e `main/device_config.c`
 * [`main/device_config.h`](../main/device_config.h#L145) cadastra `"601a"` em `default_configs[]`, mas **não cadastra `"601a-4"`**.
@@ -67,7 +70,7 @@ Leitura coletada via `GET /api/system/info` no dispositivo em operação (`192.1
 ## 4. Especificação das Melhorias de Firmware
 
 ### Fase 0 — Base Segura, Compatibilidade `601a-4` / `LT-001` e Backup
-1. **Backup físico antes de qualquer gravação:** dump integral da flash (16 MB) e da partição `nvs` (`0x9000`, `0x6000` em [`partitions.csv`](../partitions.csv#L3)) via cabo USB-C de dados (`esptool`).
+1. **Backup físico e snapshot HTTP antes de qualquer gravação:** utilizar [`scripts/backup_and_verify_gamma_v2.sh`](../scripts/backup_and_verify_gamma_v2.sh) para capturar `/api/system/info` e `/api/system/asic` (`backup-http 192.168.1.108`) e realizar o dump integral da flash (16 MB `0x0`/`0x1000000`), `otadata` (`0xf10000`, `0x2000`) e da partição `nvs` (`0x9000`, `0x6000` em [`partitions.csv`](../partitions.csv#L3)) com verificação `SHA256SUMS` (`backup-flash <porta_serial>`), validando após o flash com `verify-post-flash 192.168.1.108`.
 2. **Registro completo em [`main/device_config.h`](../main/device_config.h#L117-L152):**
    * Adicionar `FAMILY_GAMMA_V2` e `FAMILY_GAMMA_DUO` em `default_families[]`.
    * Adicionar entrada explícita `"601a-4"` em `default_configs[]` (espelhando `"601a"` com `FAMILY_GAMMA_V2`, `TPS546 = true`, `EMC2101 = true`, `power_consumption_target = 22`).
@@ -91,7 +94,7 @@ Todas as alocações em PSRAM devem verificar `esp_psram_is_initialized()` (com 
     * `ASIC_result_task` (`8192 B`)
     * `statistics_task` (`8192 B`)
     * `hashrate_monitor_task` (`4096 B`)
-  * Em [`main/http_server/websocket_log.c`](../main/http_server/websocket_log.c#L168): `websocket_log_task` (`4096 B`).
+  * Em [`main/http_server/websocket_log.c`](../main/http_server/websocket_log.c#L19): `websocket_log_task` (`4096 B`).
   * Em [`main/bap/bap_uart.c`](../main/bap/bap_uart.c#L72-L89) e [`main/bap/bap_handlers.c`](../main/bap/bap_handlers.c#L54): `uart_receive_ta` (`4096 B`), `uart_send_task` (`4096 B`) e `bap_mode_mgmt` (`2048 B`).
   * **Subtotal liberado em stacks:** **~58 KB de SRAM interna**.
   * **Restrição obrigatória (manter em SRAM interna):**
@@ -206,7 +209,7 @@ Seguindo rigorosamente as convenções do [`AGENTS.md`](../AGENTS.md) (flags boo
      * `cmlErrorCount` (`integer`: contador de eventos `STATUS_CML` recuperados)
      * `watchdogResets` (`integer`: contador de recuperações do watchdog de ASIC/domínios na sessão)
    * Adicionar suporte a `dvfsProfile` no `PATCH /api/system`.
-2. **OpenAPI & Frontend ([`main/http_server/axe-os/openapi.yaml`](../main/http_server/axe-os/openapi.yaml) e [`system.service.ts`](../main/http_server/axe-os/src/app/services/system.service.ts)):**
+2. **OpenAPI & Frontend ([`main/http_server/openapi.yaml`](../main/http_server/openapi.yaml) e [`system.service.ts`](../main/http_server/axe-os/src/app/services/system.service.ts)):**
    * Atualizar o schema `SystemInfo` e `SystemConfig` no `openapi.yaml`.
    * Executar `npm run generate:api` em `main/http_server/axe-os`.
    * Atualizar os objetos mockados em [`main/http_server/axe-os/src/app/services/system.service.ts`](../main/http_server/axe-os/src/app/services/system.service.ts).
@@ -235,4 +238,12 @@ Seguindo rigorosamente as convenções do [`AGENTS.md`](../AGENTS.md) (flags boo
   - [x] Garantir que a parada de emergência crítica (`>= 75 °C` ASIC ou `>= 105 °C` VR) acione `mining_stop()` e `overheat_mode = 1` **sem sobrescrever** tensão, frequência e modo do fan na NVS.
 - [x] **Fase 4 (*Vdroop*, Auto-Tuner DVFS & API/UI `AxeOS`):**
   - [x] Implementar compensação de *Vdroop* em malha lenta (teto `+20 mV`) e perfis DVFS (`Manual`, `Eficiência`, `Equilibrado`, `Performance`).
-  - [x] Atualizar [`system_api_json.c`](../main/http_server/system_api_json.c), [`http_server.c`](../main/http_server/http_server.c), [`openapi.yaml`](../main/http_server/axe-os/openapi.yaml), regenerar API (`npm run generate:api`), atualizar mocks em [`system.service.ts`](../main/http_server/axe-os/src/app/services/system.service.ts) e validar com `npm run test:ci` e `idf.py build`.
+  - [x] Atualizar [`system_api_json.c`](../main/http_server/system_api_json.c), [`http_server.c`](../main/http_server/http_server.c), [`openapi.yaml`](../main/http_server/openapi.yaml), regenerar API (`npm run generate:api`), atualizar mocks em [`system.service.ts`](../main/http_server/axe-os/src/app/services/system.service.ts) e validar com `npm run test:ci` e `idf.py build`.
+
+### 5.1. Changes Complementares OpenSpec (UI, Testes e Ferramental)
+
+Além das fases principais acima, as seguintes changes complementares no OpenSpec cobrem a sincronização da UI/OLED, suíte de testes unitários e ferramental de bancada:
+
+* **UI & Display (`axeos-ui-dvfs-telemetry-and-oled-sync`):** exposição da telemetria DVFS/térmica/watchdog no `AxeOS` e sincronização do OLED — [`openspec/changes/archive/2026-11-18-axeos-ui-dvfs-telemetry-and-oled-sync/proposal.md`](../openspec/changes/archive/2026-11-18-axeos-ui-dvfs-telemetry-and-oled-sync/proposal.md)
+* **Testes Unitários (`unit-tests-thermal-dvfs-watchdog-and-ui`):** cobertura unitária de *soft-throttling* térmico, DVFS, watchdog de 3 níveis e componentes de UI — [`openspec/changes/archive/2026-11-18-unit-tests-thermal-dvfs-watchdog-and-ui/proposal.md`](../openspec/changes/archive/2026-11-18-unit-tests-thermal-dvfs-watchdog-and-ui/proposal.md)
+* **Ferramental & Compatibilidade (`factory-telemetry-compat-and-flash-backup-tooling`):** script [`scripts/backup_and_verify_gamma_v2.sh`](../scripts/backup_and_verify_gamma_v2.sh), proteção de `backups/` no `.gitignore` e protocolo operacional pré/pós-flash — [`openspec/changes/archive/2026-11-18-factory-telemetry-compat-and-flash-backup-tooling/proposal.md`](../openspec/changes/archive/2026-11-18-factory-telemetry-compat-and-flash-backup-tooling/proposal.md)

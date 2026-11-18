@@ -42,6 +42,12 @@ export class EditComponent implements OnInit, OnDestroy, OnChanges {
 
   public displays = ["NONE", "SSD1306 (128x32)", "SSD1309 (128x64)", "SH1107 (64x128)", "SH1107 (128x128)"];
   public rotations = [0, 90, 180, 270];
+  public dvfsProfileOptions: Dropdown = [
+    { name: 'Manual', value: 0 },
+    { name: 'Efficiency (500–600 MHz)', value: 1 },
+    { name: 'Balanced (525–625 MHz)', value: 2 },
+    { name: 'Performance (550–675 MHz)', value: 3 },
+  ];
   public displayTimeoutControl: FormControl;
   public statsFrequencyControl: FormControl;
   public statsLimit: number = 720;
@@ -165,8 +171,9 @@ export class EditComponent implements OnInit, OnDestroy, OnChanges {
             Validators.min(-1),
             Validators.max(this.displayTimeoutMaxValue)
           ]],
-          coreVoltage: [info.coreVoltage, [Validators.required]],
-          frequency: [info.frequency, [Validators.required]],
+          coreVoltage: [info.targetVoltage ?? info.coreVoltage, [Validators.required]],
+          frequency: [info.targetFrequency ?? info.frequency, [Validators.required]],
+          dvfsProfile: [info.dvfsProfile ?? 0, [Validators.required, Validators.min(0), Validators.max(3)]],
           autofanspeed: [info.autofanspeed == 1, [Validators.required]],
           minfanspeed: [info.minFanSpeed, [Validators.required]],
           manualFanSpeed: [info.manualFanSpeed, [Validators.required]],
@@ -341,6 +348,7 @@ export class EditComponent implements OnInit, OnDestroy, OnChanges {
       'displayTimeout',
       'coreVoltage',
       'frequency',
+      'dvfsProfile',
       'autofanspeed',
       'manualFanSpeed',
       'temptarget',

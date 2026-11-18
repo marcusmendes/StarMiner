@@ -46,13 +46,26 @@
             </ng-container>
         </div>
 
+        <div class="field grid p-fluid">
+            <label (click)="dvfsProfileDropdown.show()" class="col-12 md:col-2 md:m-0 hover-next-input">DVFS Profile</label>
+            <div class="col-12 md:col-10">
+                <p-dropdown
+                    [options]="dvfsProfileOptions"
+                    optionLabel="name"
+                    optionValue="value"
+                    formControlName="dvfsProfile"
+                    #dvfsProfileDropdown
+                ></p-dropdown>
+            </div>
+        </div>
+
         <div *ngIf="form.get('overheat_mode')?.value === 1" class="mt-4">
             <button pButton type="button" label="Disable Overheat Mode"
                     class="p-button-danger w-full"
                     (click)="disableOverheatMode()">
             </button>
             <small class="block mt-1 text-center text-primary">
-                Make sure to reset Frequency and Voltage before clicking this button.
+                Frequency, voltage, and fan settings were preserved in NVS. Adjust targets if needed before resuming.
             </small>
         </div>
 

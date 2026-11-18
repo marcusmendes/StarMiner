@@ -272,7 +272,14 @@
 
                     <div class="mb-3">
                         <h6 class="flex justify-content-between mb-1">
-                            ASIC Frequency<span>{{info.actualFrequency | number: '1.0-4'}} MHz</span>
+                            <span>
+                                ASIC Frequency
+                                <small *ngIf="(info.dvfsProfile ?? 0) > 0" class="text-500 ml-1">({{getDvfsProfileLabel(info.dvfsProfile)}})</small>
+                            </span>
+                            <span>
+                                {{info.actualFrequency | number: '1.0-4'}} MHz
+                                <small *ngIf="info.targetFrequency && info.targetFrequency !== (info.actualFrequency ?? info.frequency)" class="text-500 ml-1">(Target: {{info.targetFrequency}} MHz)</small>
+                            </span>
                         </h6>
                         <p-progressBar [value]="(info.actualFrequency / maxFrequency) * 100" [styleClass]="'p-progressbar--thin'">
                             <ng-template pTemplate="content" let-value></ng-template>
@@ -281,7 +288,11 @@
 
                     <div>
                         <h6 class="flex justify-content-between mb-1">
-                            Measured ASIC Voltage<span>{{info.coreVoltageActual}} V</span>
+                            Measured ASIC Voltage
+                            <span>
+                                {{info.coreVoltageActual}} V
+                                <small *ngIf="(info.vdroopOffsetMv ?? 0) > 0" class="text-500 ml-1">(+{{info.vdroopOffsetMv}} mV Vdroop)</small>
+                            </span>
                         </h6>
                         <p-progressBar [value]="(info.coreVoltageActual / 1.8) * 100" [styleClass]="'p-progressbar--thin'">
                             <ng-template pTemplate="content" let-value></ng-template>

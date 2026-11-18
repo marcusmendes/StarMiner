@@ -80,13 +80,25 @@ export class SystemComponent implements OnInit, OnDestroy {
     return 'Weak';
   }
 
+  formatDvfsProfile(profile?: number): string {
+    switch (profile) {
+      case 1: return 'Efficiency';
+      case 2: return 'Balanced';
+      case 3: return 'Performance';
+      default: return 'Manual';
+    }
+  }
+
   getSystemRows(data: CombinedData): TableRow[] {
     return [
       { label: 'Device Model', value: data.asic.deviceModel || 'Other', valueClass: 'text-' + data.asic.swarmColor + '-500' },
       { label: 'Board Version', value: data.info.boardVersion },
       { label: 'ASIC Type', value: (data.asic.asicCount > 1 ? data.asic.asicCount + 'x ' : ' ') + data.asic.ASICModel, class: 'pb-3' },
       { label: 'Uptime', value: DateAgoPipe.transform(data.info.uptimeSeconds) },
-      { label: 'Reset Reason', value: data.info.resetReason, class: 'pb-3' },
+      { label: 'Reset Reason', value: data.info.resetReason },
+      { label: 'DVFS Profile', value: this.formatDvfsProfile(data.info.dvfsProfile) },
+      { label: 'ASIC Watchdog Resets', value: String(data.info.watchdogResets ?? 0) },
+      { label: 'PMBus CML Recoveries', value: String(data.info.cmlErrorCount ?? 0), class: 'pb-3' },
       { label: 'Wi-Fi SSID', value: data.info.ssid, isSensitiveData: true },
       { label: 'Wi-Fi Status', value: data.info.wifiStatus },
       { label: 'Wi-Fi RSSI', value: data.info.wifiRSSI + ' dBm', valueClass: this.getWifiRssiColor(data.info.wifiRSSI), tooltip: this.getWifiRssiTooltip(data.info.wifiRSSI) },

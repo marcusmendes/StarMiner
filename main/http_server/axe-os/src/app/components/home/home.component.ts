@@ -31,6 +31,7 @@ type MessageType =
   | 'SYSTEM_INFO_ERROR'
   | 'MINING_PAUSED'
   | 'DEVICE_OVERHEAT'
+  | 'THERMAL_THROTTLE'
   | 'POWER_FAULT'
   | 'FREQUENCY_LOW'
   | 'FALLBACK_STRATUM'
@@ -838,6 +839,7 @@ export class HomeComponent implements OnInit, OnDestroy {
         processed.current = processed.current / 1000;
         processed.coreVoltageActual = processed.coreVoltageActual / 1000;
         processed.coreVoltage = processed.coreVoltage / 1000;
+        processed.targetVoltage = (info.targetVoltage ?? info.coreVoltage) / 1000;
         return processed;
       }),
       tap(info => {
@@ -936,6 +938,7 @@ export class HomeComponent implements OnInit, OnDestroy {
         formatted.current = parseFloat(formatted.current.toFixed(1));
         formatted.coreVoltageActual = parseFloat(formatted.coreVoltageActual.toFixed(2));
         formatted.coreVoltage = parseFloat(formatted.coreVoltage.toFixed(2));
+        formatted.targetVoltage = parseFloat((formatted.targetVoltage ?? formatted.coreVoltage).toFixed(2));
         formatted.temp = parseFloat(formatted.temp.toFixed(1));
         formatted.temp2 = parseFloat(formatted.temp2.toFixed(1));
         formatted.responseTime = parseFloat(formatted.responseTime.toFixed(1));
@@ -1070,6 +1073,15 @@ export class HomeComponent implements OnInit, OnDestroy {
     return -1;
   }
 
+  public getDvfsProfileLabel(profile?: number): string {
+    switch (profile) {
+      case 1: return 'Efficiency';
+      case 2: return 'Balanced';
+      case 3: return 'Performance';
+      default: return 'Manual';
+    }
+  }
+
   public handleSystemMessages(info: ISystemInfo, systemInfoError: ISystemInfoError) {
     const updateMessage = (
       condition: boolean,
@@ -1098,9 +1110,17 @@ export class HomeComponent implements OnInit, OnDestroy {
     updateMessage(!!systemInfoError.duration, 'SYSTEM_INFO_ERROR', 'error', `Unable to reach the device for ${DateAgoPipe.transform(systemInfoError.duration, { strict: true })}`);
     updateMessage(!!(info as any).miningPaused, 'MINING_PAUSED', 'warn', 'Mining is paused');
     updateMessage(!!info.overheat_mode, 'DEVICE_OVERHEAT', 'error', 'Device has overheated - See settings');
+    const effectiveFreq = Math.round(info.actualFrequency || info.frequency);
+    const targetFrequency = info.targetFrequency ?? info.frequency;
+    updateMessage(
+      info.throttleActive === 1,
+      'THERMAL_THROTTLE',
+      'warn',
+      `Thermal throttling active (${effectiveFreq} / ${targetFrequency} MHz, ${info.coreVoltage} V)`
+    );
     updateMessage(!!info.power_fault, 'POWER_FAULT', 'error', `${info.power_fault} Check your Power Supply.`);
     updateMessage(!!info.hardware_fault, 'HARDWARE_FAULT', 'error', `${info.hardware_fault}`);
-    updateMessage(!info.frequency || info.frequency < 400, 'FREQUENCY_LOW', 'warn', 'Device frequency is set low - See settings');
+    updateMessage(!targetFrequency || targetFrequency < 400, 'FREQUENCY_LOW', 'warn', 'Device frequency is set low - See settings');
     updateMessage(!!info.isUsingFallbackStratum, 'FALLBACK_STRATUM', 'warn', 'Using fallback pool - Share stats reset. Check Pool Settings and / or reboot Device.');
     updateMessage(info.version !== info.axeOSVersion, 'VERSION_MISMATCH', 'warn', `Firmware (${info.version}) and AxeOS (${info.axeOSVersion}) versions do not match. Please make sure to update both www.bin and esp-miner.bin.`);
     if (info.coinbaseOutputs && info.coinbaseOutputs.length > 0) {

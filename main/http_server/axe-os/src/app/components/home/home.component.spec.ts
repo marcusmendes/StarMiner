@@ -121,4 +121,61 @@ describe('HomeComponent', () => {
       expect(component['lastMessageTime']).toBeGreaterThan(initialTime);
     });
   });
+
+  describe('thermal throttling and target frequency messages', () => {
+    const baseSystemInfo: any = {
+      frequency: 500,
+      actualFrequency: 500,
+      targetFrequency: 550,
+      coreVoltage: 1.15,
+      targetVoltage: 1.15,
+      throttleActive: 0,
+      overheat_mode: 0,
+      version: 'v2.12.0',
+      axeOSVersion: 'v2.12.0',
+      isUsingFallbackStratum: 0,
+      coinbaseOutputs: [],
+    };
+
+    it('should add THERMAL_THROTTLE warn message when throttleActive is 1 and remove it when 0', () => {
+      component.handleSystemMessages(
+        { ...baseSystemInfo, frequency: 475, actualFrequency: 475, throttleActive: 1 },
+        { duration: 0, startTime: null }
+      );
+
+      const throttleMsg = component.messages.find(m => m.type === 'THERMAL_THROTTLE');
+      expect(throttleMsg).toBeDefined();
+      expect(throttleMsg?.severity).toBe('warn');
+
+      component.handleSystemMessages(
+        { ...baseSystemInfo, throttleActive: 0 },
+        { duration: 0, startTime: null }
+      );
+
+      expect(component.messages.find(m => m.type === 'THERMAL_THROTTLE')).toBeUndefined();
+    });
+
+    it('should not emit FREQUENCY_LOW when frequency < 400 while targetFrequency >= 400', () => {
+      component.handleSystemMessages(
+        { ...baseSystemInfo, frequency: 350, actualFrequency: 350, targetFrequency: 550, throttleActive: 1 },
+        { duration: 0, startTime: null }
+      );
+
+      expect(component.messages.find(m => m.type === 'FREQUENCY_LOW')).toBeUndefined();
+
+      component.handleSystemMessages(
+        { ...baseSystemInfo, frequency: 350, actualFrequency: 350, targetFrequency: 350 },
+        { duration: 0, startTime: null }
+      );
+
+      expect(component.messages.find(m => m.type === 'FREQUENCY_LOW')).toBeDefined();
+    });
+
+    it('should return expected labels from getDvfsProfileLabel', () => {
+      expect(component.getDvfsProfileLabel(0)).toBe('Manual');
+      expect(component.getDvfsProfileLabel(1)).toBe('Efficiency');
+      expect(component.getDvfsProfileLabel(2)).toBe('Balanced');
+      expect(component.getDvfsProfileLabel(3)).toBe('Performance');
+    });
+  });
 });

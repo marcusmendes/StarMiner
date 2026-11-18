@@ -1,58 +1,66 @@
 <?xml version="1.0"?>
-<testsuite name="Chrome Headless 157.0.0.0 (Mac OS 10.15.7)" package="" timestamp="2026-11-18T13:29:28" id="0" hostname="GHQNXYP4T7H" tests="39" errors="0" failures="0" time="0.168">
+<testsuite name="Chrome Headless 158.0.0.0 (Mac OS 10.15.7)" package="" timestamp="2026-11-18T14:13:03" id="0" hostname="GHQNXYP4T7H" tests="41" errors="0" failures="0" time="0.169">
   <properties>
-    <property name="browser.fullName" value="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/157.0.0.0 Safari/537.36"/>
+    <property name="browser.fullName" value="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/158.0.0.0 Safari/537.36"/>
   </properties>
-  <testcase name="NetworkComponent should create" time="0.027" classname="NetworkComponent"/>
-  <testcase name="SatsPipe create an instance" time="0" classname="SatsPipe"/>
-  <testcase name="LogsComponent should create" time="0.016" classname="LogsComponent"/>
-  <testcase name="SwarmComponent should create" time="0.026" classname="SwarmComponent"/>
-  <testcase name="ScoreboardComponent should create" time="0.004" classname="ScoreboardComponent"/>
-  <testcase name="SettingsComponent should create" time="0.009" classname="SettingsComponent"/>
-  <testcase name="NetworkEditComponent should create" time="0.001" classname="NetworkEditComponent"/>
-  <testcase name="DateAgoPipe create an instance" time="0" classname="DateAgoPipe"/>
-  <testcase name="LoadingComponent should create" time="0.002" classname="LoadingComponent"/>
-  <testcase name="ByteSuffixPipe create an instance" time="0" classname="ByteSuffixPipe"/>
-  <testcase name="ModalComponent should create" time="0" classname="ModalComponent"/>
-  <testcase name="LocalStorageService should be created" time="0.001" classname="LocalStorageService"/>
-  <testcase name="HashSuffixPipe create an instance" time="0" classname="HashSuffixPipe"/>
-  <testcase name="SystemApiService should be created" time="0" classname="SystemApiService"/>
-  <testcase name="WifiIconComponent should create" time="0.002" classname="WifiIconComponent"/>
-  <testcase name="AppComponent should create the app" time="0.002" classname="AppComponent"/>
+  <testcase name="LogsComponent should create" time="0.032" classname="LogsComponent"/>
+  <testcase name="LoadingComponent should create" time="0.003" classname="LoadingComponent"/>
+  <testcase name="WifiIconComponent should create" time="0.003" classname="WifiIconComponent"/>
+  <testcase name="NetworkComponent should create" time="0.005" classname="NetworkComponent"/>
+  <testcase name="GithubUpdateService should be created" time="0.001" classname="GithubUpdateService"/>
   <testcase name="ShareRejectionExplanationService should return explanations for known keys from JSON" time="0.001" classname="ShareRejectionExplanationService"/>
   <testcase name="ShareRejectionExplanationService should return null for unknown key" time="0" classname="ShareRejectionExplanationService"/>
-  <testcase name="DiffSuffixPipe create an instance" time="0" classname="DiffSuffixPipe"/>
+  <testcase name="UpdateComponent should create" time="0.02" classname="UpdateComponent"/>
+  <testcase name="LoadingService should be created" time="0.001" classname="LoadingService"/>
   <testcase name="WifiIconComponent should create" time="0.002" classname="WifiIconComponent"/>
-  <testcase name="ANSIPipe create an instance" time="0" classname="ANSIPipe"/>
-  <testcase name="LoadingService should be created" time="0" classname="LoadingService"/>
   <testcase name="SystemComponent should create" time="0.002" classname="SystemComponent"/>
-  <testcase name="SystemComponent should include DVFS Profile, ASIC Watchdog Resets, and PMBus CML Recoveries rows" time="0.001" classname="SystemComponent"/>
+  <testcase name="SystemComponent should include DVFS Profile (Performance), ASIC Watchdog Resets, and PMBus CML Recoveries rows" time="0.001" classname="SystemComponent"/>
+  <testcase name="SystemComponent should format Balanced and Manual DVFS Profile rows and default missing counters to 0" time="0.001" classname="SystemComponent"/>
+  <testcase name="WebSocketService should be created" time="0" classname="WebSocketService"/>
   <testcase name="AddressPipe create an instance" time="0" classname="AddressPipe"/>
-  <testcase name="GithubUpdateService should be created" time="0" classname="GithubUpdateService"/>
   <testcase name="WifiIconComponent should create" time="0.002" classname="WifiIconComponent"/>
-  <testcase name="HomeComponent should create" time="0.024" classname="HomeComponent"/>
+  <testcase name="SystemApiService should be created" time="0" classname="SystemApiService"/>
+  <testcase name="LocalStorageService should be created" time="0" classname="LocalStorageService"/>
+  <testcase name="HomeComponent should create" time="0.026" classname="HomeComponent"/>
+  <testcase name="HomeComponent thermal throttling and target frequency messages should emit FREQUENCY_LOW only when targetFrequency &lt; 400" time="0.002" classname="HomeComponent thermal throttling and target frequency messages"/>
+  <testcase name="HomeComponent thermal throttling and target frequency messages should add THERMAL_THROTTLE warn message without FREQUENCY_LOW when throttleActive is 1 and remove it when 0" time="0.001" classname="HomeComponent thermal throttling and target frequency messages"/>
   <testcase name="HomeComponent thermal throttling and target frequency messages should return expected labels from getDvfsProfileLabel" time="0.001" classname="HomeComponent thermal throttling and target frequency messages"/>
-  <testcase name="HomeComponent thermal throttling and target frequency messages should not emit FREQUENCY_LOW when frequency &lt; 400 while targetFrequency >= 400" time="0.002" classname="HomeComponent thermal throttling and target frequency messages"/>
-  <testcase name="HomeComponent thermal throttling and target frequency messages should add THERMAL_THROTTLE warn message when throttleActive is 1 and remove it when 0" time="0.001" classname="HomeComponent thermal throttling and target frequency messages"/>
+  <testcase name="HomeComponent stale data and visibility state should set stale data error when visible and last message is old" time="0.002" classname="HomeComponent stale data and visibility state"/>
   <testcase name="HomeComponent stale data and visibility state should reset lastMessageTime and clear stale error when transitioning to visible" time="0.001" classname="HomeComponent stale data and visibility state"/>
   <testcase name="HomeComponent stale data and visibility state should NOT set stale data error when hidden and last message is old" time="0.001" classname="HomeComponent stale data and visibility state"/>
-  <testcase name="HomeComponent stale data and visibility state should set stale data error when visible and last message is old" time="0.001" classname="HomeComponent stale data and visibility state"/>
-  <testcase name="EditComponent should initialize frequency and coreVoltage from targetFrequency and targetVoltage when present" time="0.012" classname="EditComponent"/>
-  <testcase name="EditComponent should create" time="0.006" classname="EditComponent"/>
-  <testcase name="EditComponent should save dvfsProfile changes via updateSystem without requiring restart" time="0.007" classname="EditComponent"/>
-  <testcase name="UpdateComponent should create" time="0.013" classname="UpdateComponent"/>
-  <testcase name="WebSocketService should be created" time="0.001" classname="WebSocketService"/>
+  <testcase name="ModalComponent should create" time="0.001" classname="ModalComponent"/>
+  <testcase name="SwarmComponent should create" time="0.015" classname="SwarmComponent"/>
+  <testcase name="AppComponent should create the app" time="0.001" classname="AppComponent"/>
+  <testcase name="EditComponent should fall back to frequency, coreVoltage, and Manual dvfsProfile when targets are undefined" time="0.021" classname="EditComponent"/>
+  <testcase name="EditComponent should save dvfsProfile changes (0..3) via updateSystem without requiring restart" time="0.008" classname="EditComponent"/>
+  <testcase name="EditComponent should create" time="0.005" classname="EditComponent"/>
+  <testcase name="EditComponent should initialize frequency and coreVoltage from targetFrequency and targetVoltage when present" time="0.005" classname="EditComponent"/>
+  <testcase name="ScoreboardComponent should create" time="0.003" classname="ScoreboardComponent"/>
+  <testcase name="SettingsComponent should create" time="0.001" classname="SettingsComponent"/>
+  <testcase name="NetworkEditComponent should create" time="0.001" classname="NetworkEditComponent"/>
+  <testcase name="DiffSuffixPipe create an instance" time="0" classname="DiffSuffixPipe"/>
+  <testcase name="DateAgoPipe create an instance" time="0" classname="DateAgoPipe"/>
+  <testcase name="SatsPipe create an instance" time="0" classname="SatsPipe"/>
+  <testcase name="ByteSuffixPipe create an instance" time="0" classname="ByteSuffixPipe"/>
+  <testcase name="ANSIPipe create an instance" time="0" classname="ANSIPipe"/>
+  <testcase name="HashSuffixPipe create an instance" time="0" classname="HashSuffixPipe"/>
   <system-out>
-    <![CDATA[Chrome Headless 157.0.0.0 (Mac OS 10.15.7) LOG: '🔒 Here be dragons! Advanced settings are locked for your protection. 
+    <![CDATA[Chrome Headless 158.0.0.0 (Mac OS 10.15.7) LOG: '🔒 Here be dragons! Advanced settings are locked for your protection. 
 Only the bravest miners dare to venture forth... 
 If you wish to unlock dangerous overclocking powers, add: %c?oc', 'color: #ff4400; text-decoration: underline; cursor: pointer; font-weight: bold;', 'to the current URL'
-,Chrome Headless 157.0.0.0 (Mac OS 10.15.7) LOG: '🔒 Here be dragons! Advanced settings are locked for your protection. 
+,Chrome Headless 158.0.0.0 (Mac OS 10.15.7) LOG: '🔒 Here be dragons! Advanced settings are locked for your protection. 
 Only the bravest miners dare to venture forth... 
 If you wish to unlock dangerous overclocking powers, add: %c?oc', 'color: #ff4400; text-decoration: underline; cursor: pointer; font-weight: bold;', 'to the current URL'
-,Chrome Headless 157.0.0.0 (Mac OS 10.15.7) LOG: '🔒 Here be dragons! Advanced settings are locked for your protection. 
+,Chrome Headless 158.0.0.0 (Mac OS 10.15.7) LOG: '🔒 Here be dragons! Advanced settings are locked for your protection. 
 Only the bravest miners dare to venture forth... 
 If you wish to unlock dangerous overclocking powers, add: %c?oc', 'color: #ff4400; text-decoration: underline; cursor: pointer; font-weight: bold;', 'to the current URL'
-,Chrome Headless 157.0.0.0 (Mac OS 10.15.7) LOG: '🔒 Here be dragons! Advanced settings are locked for your protection. 
+,Chrome Headless 158.0.0.0 (Mac OS 10.15.7) LOG: '🔒 Here be dragons! Advanced settings are locked for your protection. 
+Only the bravest miners dare to venture forth... 
+If you wish to unlock dangerous overclocking powers, add: %c?oc', 'color: #ff4400; text-decoration: underline; cursor: pointer; font-weight: bold;', 'to the current URL'
+,Chrome Headless 158.0.0.0 (Mac OS 10.15.7) LOG: '🔒 Here be dragons! Advanced settings are locked for your protection. 
+Only the bravest miners dare to venture forth... 
+If you wish to unlock dangerous overclocking powers, add: %c?oc', 'color: #ff4400; text-decoration: underline; cursor: pointer; font-weight: bold;', 'to the current URL'
+,Chrome Headless 158.0.0.0 (Mac OS 10.15.7) LOG: '🔒 Here be dragons! Advanced settings are locked for your protection. 
 Only the bravest miners dare to venture forth... 
 If you wish to unlock dangerous overclocking powers, add: %c?oc', 'color: #ff4400; text-decoration: underline; cursor: pointer; font-weight: bold;', 'to the current URL'
 

@@ -137,34 +137,37 @@ describe('HomeComponent', () => {
       coinbaseOutputs: [],
     };
 
-    it('should add THERMAL_THROTTLE warn message when throttleActive is 1 and remove it when 0', () => {
+    it('should add THERMAL_THROTTLE warn message without FREQUENCY_LOW when throttleActive is 1 and remove it when 0', () => {
       component.handleSystemMessages(
-        { ...baseSystemInfo, frequency: 475, actualFrequency: 475, throttleActive: 1 },
+        { ...baseSystemInfo, frequency: 387.5, actualFrequency: 387.5, targetFrequency: 550, throttleActive: 1 },
         { duration: 0, startTime: null }
       );
 
       const throttleMsg = component.messages.find(m => m.type === 'THERMAL_THROTTLE');
       expect(throttleMsg).toBeDefined();
       expect(throttleMsg?.severity).toBe('warn');
+      expect(throttleMsg?.text).toContain('388 / 550 MHz');
+      expect(component.messages.find(m => m.type === 'FREQUENCY_LOW')).toBeUndefined();
 
       component.handleSystemMessages(
-        { ...baseSystemInfo, throttleActive: 0 },
+        { ...baseSystemInfo, frequency: 550, actualFrequency: 550, targetFrequency: 550, throttleActive: 0 },
         { duration: 0, startTime: null }
       );
 
       expect(component.messages.find(m => m.type === 'THERMAL_THROTTLE')).toBeUndefined();
+      expect(component.messages.find(m => m.type === 'FREQUENCY_LOW')).toBeUndefined();
     });
 
-    it('should not emit FREQUENCY_LOW when frequency < 400 while targetFrequency >= 400', () => {
+    it('should emit FREQUENCY_LOW only when targetFrequency < 400', () => {
       component.handleSystemMessages(
-        { ...baseSystemInfo, frequency: 350, actualFrequency: 350, targetFrequency: 550, throttleActive: 1 },
+        { ...baseSystemInfo, frequency: 387.5, actualFrequency: 387.5, targetFrequency: 400, throttleActive: 1 },
         { duration: 0, startTime: null }
       );
 
       expect(component.messages.find(m => m.type === 'FREQUENCY_LOW')).toBeUndefined();
 
       component.handleSystemMessages(
-        { ...baseSystemInfo, frequency: 350, actualFrequency: 350, targetFrequency: 350 },
+        { ...baseSystemInfo, frequency: 350, actualFrequency: 350, targetFrequency: 350, throttleActive: 0 },
         { duration: 0, startTime: null }
       );
 

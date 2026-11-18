@@ -24,41 +24,63 @@ describe('SystemComponent', () => {
     expect(component).toBeTruthy();
   });
 
-  it('should include DVFS Profile, ASIC Watchdog Resets, and PMBus CML Recoveries rows', () => {
+  const baseInfo: any = {
+    boardVersion: '602',
+    uptimeSeconds: 120,
+    resetReason: 'Power-on reset',
+    dvfsProfile: 3,
+    watchdogResets: 2,
+    cmlErrorCount: 4,
+    ssid: 'net',
+    wifiStatus: 'Connected!',
+    wifiRSSI: -45,
+    ipv4: '192.168.1.2',
+    ipv6: 'fe80::1',
+    macAddr: '00:11:22:33:44:55',
+    cpuUsage: 10,
+    freeHeap: 1000,
+    freeHeapInternal: 1000,
+    freeHeapSpiram: 1000,
+    minFreeHeap: 900,
+    maxAllocHeap: 800,
+    version: 'v2.12.0',
+    axeOSVersion: 'v2.12.0',
+    idfVersion: 'v5.5.1',
+  };
+
+  const baseAsic: any = {
+    deviceModel: 'Gamma',
+    swarmColor: 'purple',
+    asicCount: 1,
+    ASICModel: 'BM1370',
+  };
+
+  it('should include DVFS Profile (Performance), ASIC Watchdog Resets, and PMBus CML Recoveries rows', () => {
     const rows = component.getSystemRows({
-      info: {
-        boardVersion: '602',
-        uptimeSeconds: 120,
-        resetReason: 'Power-on reset',
-        dvfsProfile: 2,
-        watchdogResets: 1,
-        cmlErrorCount: 3,
-        ssid: 'net',
-        wifiStatus: 'Connected!',
-        wifiRSSI: -45,
-        ipv4: '192.168.1.2',
-        ipv6: 'fe80::1',
-        macAddr: '00:11:22:33:44:55',
-        cpuUsage: 10,
-        freeHeap: 1000,
-        freeHeapInternal: 1000,
-        freeHeapSpiram: 1000,
-        minFreeHeap: 900,
-        maxAllocHeap: 800,
-        version: 'v2.12.0',
-        axeOSVersion: 'v2.12.0',
-        idfVersion: 'v5.5.1',
-      } as any,
-      asic: {
-        deviceModel: 'Gamma',
-        swarmColor: 'purple',
-        asicCount: 1,
-        ASICModel: 'BM1370',
-      } as any,
+      info: { ...baseInfo, dvfsProfile: 3, watchdogResets: 2, cmlErrorCount: 4 },
+      asic: baseAsic,
     });
 
-    expect(rows.find(r => r.label === 'DVFS Profile')?.value).toBe('Balanced');
-    expect(rows.find(r => r.label === 'ASIC Watchdog Resets')?.value).toBe('1');
-    expect(rows.find(r => r.label === 'PMBus CML Recoveries')?.value).toBe('3');
+    expect(rows.find(r => r.label === 'DVFS Profile')?.value).toBe('Performance');
+    expect(rows.find(r => r.label === 'ASIC Watchdog Resets')?.value).toBe('2');
+    expect(rows.find(r => r.label === 'PMBus CML Recoveries')?.value).toBe('4');
+  });
+
+  it('should format Balanced and Manual DVFS Profile rows and default missing counters to 0', () => {
+    const balancedRows = component.getSystemRows({
+      info: { ...baseInfo, dvfsProfile: 2, watchdogResets: 1, cmlErrorCount: 3 },
+      asic: baseAsic,
+    });
+    expect(balancedRows.find(r => r.label === 'DVFS Profile')?.value).toBe('Balanced');
+    expect(balancedRows.find(r => r.label === 'ASIC Watchdog Resets')?.value).toBe('1');
+    expect(balancedRows.find(r => r.label === 'PMBus CML Recoveries')?.value).toBe('3');
+
+    const manualRows = component.getSystemRows({
+      info: { ...baseInfo, dvfsProfile: 0, watchdogResets: undefined, cmlErrorCount: undefined },
+      asic: baseAsic,
+    });
+    expect(manualRows.find(r => r.label === 'DVFS Profile')?.value).toBe('Manual');
+    expect(manualRows.find(r => r.label === 'ASIC Watchdog Resets')?.value).toBe('0');
+    expect(manualRows.find(r => r.label === 'PMBus CML Recoveries')?.value).toBe('0');
   });
 });

@@ -14,14 +14,15 @@
 #include "asic_init.h"
 #include "asic_reset.h"
 #include "driver/uart.h"
+#include "power_control_math.h"
 
 #define POLL_RATE 100
 
 // Hard Caps (physical safety limits in RAM)
-#define VCORE_MIN_MV 1000
-#define VCORE_MAX_MV 1250
-#define FREQ_MIN_MHZ 400.0f
-#define MAX_POWER_W 32.0f
+#define VCORE_MIN_MV PCM_VCORE_MIN_MV
+#define VCORE_MAX_MV PCM_VCORE_MAX_MV
+#define FREQ_MIN_MHZ PCM_FREQ_MIN_MHZ
+#define MAX_POWER_W  PCM_MAX_POWER_W
 
 // Thermal thresholds (Celsius)
 #define ASIC_SOFT_THROTTLE_TEMP 68.0f
@@ -50,10 +51,10 @@
 // Slow-loop Vdroop compensation
 #define VDROOP_CHECK_INTERVAL_US       (10LL * 1000000LL)
 #define VDROOP_FREQ_SETTLE_US          (10LL * 1000000LL)
-#define VDROOP_STEP_MV                 5
-#define VDROOP_MAX_OFFSET_MV           20
-#define VDROOP_DEADBAND_MV             5.0f
-#define VDROOP_VALID_VOLTAGE_MIN_MV    500.0f
+#define VDROOP_STEP_MV                 PCM_VDROOP_STEP_MV
+#define VDROOP_MAX_OFFSET_MV           PCM_VDROOP_MAX_OFFSET_MV
+#define VDROOP_DEADBAND_MV             PCM_VDROOP_DEADBAND_MV
+#define VDROOP_VALID_VOLTAGE_MIN_MV    PCM_VDROOP_VALID_VOLTAGE_MIN_MV
 
 // DVFS profiles and Auto-Tuner envelopes
 #define DVFS_STEP_INTERVAL_US          (60LL * 1000000LL)
@@ -61,28 +62,28 @@
 #define DVFS_VCORE_STEP_DOWN_MV        5
 #define DVFS_VCORE_STEP_UP_MV          10
 
-#define DVFS_EFFICIENCY_MIN_FREQ_MHZ   500.0f
-#define DVFS_EFFICIENCY_MAX_FREQ_MHZ   600.0f
+#define DVFS_EFFICIENCY_MIN_FREQ_MHZ   PCM_DVFS_EFFICIENCY_MIN_FREQ_MHZ
+#define DVFS_EFFICIENCY_MAX_FREQ_MHZ   PCM_DVFS_EFFICIENCY_MAX_FREQ_MHZ
 #define DVFS_EFFICIENCY_MAX_ERROR_PCT  0.5f
 
-#define DVFS_BALANCED_MIN_FREQ_MHZ     525.0f
-#define DVFS_BALANCED_MAX_FREQ_MHZ     625.0f
+#define DVFS_BALANCED_MIN_FREQ_MHZ     PCM_DVFS_BALANCED_MIN_FREQ_MHZ
+#define DVFS_BALANCED_MAX_FREQ_MHZ     PCM_DVFS_BALANCED_MAX_FREQ_MHZ
 #define DVFS_BALANCED_MAX_ERROR_PCT    0.8f
 #define DVFS_BALANCED_MAX_ASIC_TEMP    64.0f
 #define DVFS_BALANCED_MAX_VR_TEMP      80.0f
 
-#define DVFS_PERFORMANCE_MIN_FREQ_MHZ  550.0f
-#define DVFS_PERFORMANCE_MAX_FREQ_MHZ  675.0f
+#define DVFS_PERFORMANCE_MIN_FREQ_MHZ  PCM_DVFS_PERFORMANCE_MIN_FREQ_MHZ
+#define DVFS_PERFORMANCE_MAX_FREQ_MHZ  PCM_DVFS_PERFORMANCE_MAX_FREQ_MHZ
 #define DVFS_PERFORMANCE_MAX_ERROR_PCT 1.0f
 #define DVFS_PERFORMANCE_MAX_ASIC_TEMP 68.0f
 #define DVFS_PERFORMANCE_MAX_VR_TEMP   90.0f
 #define DVFS_PERFORMANCE_MAX_POWER_W   31.0f
 
 typedef enum {
-    DVFS_PROFILE_MANUAL = 0,
-    DVFS_PROFILE_EFFICIENCY = 1,
-    DVFS_PROFILE_BALANCED = 2,
-    DVFS_PROFILE_PERFORMANCE = 3,
+    DVFS_PROFILE_MANUAL = PCM_DVFS_PROFILE_MANUAL,
+    DVFS_PROFILE_EFFICIENCY = PCM_DVFS_PROFILE_EFFICIENCY,
+    DVFS_PROFILE_BALANCED = PCM_DVFS_PROFILE_BALANCED,
+    DVFS_PROFILE_PERFORMANCE = PCM_DVFS_PROFILE_PERFORMANCE,
 } DvfsProfile;
 
 static const char * TAG = "power_management";
@@ -106,79 +107,44 @@ static bool are_asic_temps_below(float chip1, float chip2, float limit)
            (!chip2_valid || chip2 < limit);
 }
 
-static uint16_t clamp_vcore_i32(int32_t voltage_mv)
-{
-    if (voltage_mv < VCORE_MIN_MV) {
-        return VCORE_MIN_MV;
-    }
-    if (voltage_mv > VCORE_MAX_MV) {
-        return VCORE_MAX_MV;
-    }
-    return (uint16_t) voltage_mv;
-}
-
-static bool get_dvfs_freq_bounds(uint16_t profile, float * min_freq, float * max_freq)
-{
-    switch (profile) {
-        case DVFS_PROFILE_EFFICIENCY:
-            *min_freq = DVFS_EFFICIENCY_MIN_FREQ_MHZ;
-            *max_freq = DVFS_EFFICIENCY_MAX_FREQ_MHZ;
-            return true;
-        case DVFS_PROFILE_BALANCED:
-            *min_freq = DVFS_BALANCED_MIN_FREQ_MHZ;
-            *max_freq = DVFS_BALANCED_MAX_FREQ_MHZ;
-            return true;
-        case DVFS_PROFILE_PERFORMANCE:
-            *min_freq = DVFS_PERFORMANCE_MIN_FREQ_MHZ;
-            *max_freq = DVFS_PERFORMANCE_MAX_FREQ_MHZ;
-            return true;
-        default:
-            return false;
-    }
-}
-
 static float get_dvfs_base_target_freq(const PowerManagementModule * power_management)
 {
-    float min_freq = FREQ_MIN_MHZ;
-    float max_freq = DVFS_PERFORMANCE_MAX_FREQ_MHZ;
-    float raw_freq = power_management->target_frequency + power_management->dvfs_freq_offset_mhz;
-
-    if (!get_dvfs_freq_bounds(power_management->dvfs_profile, &min_freq, &max_freq)) {
-        return power_management->target_frequency;
-    }
-
-    if (raw_freq < min_freq) {
-        return min_freq;
-    }
-    if (raw_freq > max_freq) {
-        return max_freq;
-    }
-    return raw_freq;
+    return pcm_compute_dvfs_base_freq(power_management->dvfs_profile,
+                                      power_management->target_frequency,
+                                      power_management->dvfs_freq_offset_mhz);
 }
 
 static uint16_t get_dvfs_base_target_voltage_mv(const PowerManagementModule * power_management)
 {
-    return clamp_vcore_i32((int32_t) power_management->target_voltage +
-                           (int32_t) power_management->dvfs_voltage_offset_mv);
+    return pcm_compute_effective_vcore(power_management->target_voltage,
+                                       power_management->dvfs_voltage_offset_mv,
+                                       0,
+                                       0);
 }
 
 static uint16_t get_base_voltage_mv(const PowerManagementModule * power_management)
 {
-    uint16_t dvfs_target_mv = get_dvfs_base_target_voltage_mv(power_management);
-    return clamp_vcore_i32((int32_t) dvfs_target_mv - (int32_t) power_management->thermal_offset_mv);
+    return pcm_compute_effective_vcore(power_management->target_voltage,
+                                       power_management->dvfs_voltage_offset_mv,
+                                       power_management->thermal_offset_mv,
+                                       0);
 }
 
 static uint16_t get_effective_voltage_mv(const PowerManagementModule * power_management)
 {
-    uint16_t base_voltage_mv = get_base_voltage_mv(power_management);
-    return clamp_vcore_i32((int32_t) base_voltage_mv + (int32_t) power_management->vdroop_offset_mv);
+    return pcm_compute_effective_vcore(power_management->target_voltage,
+                                       power_management->dvfs_voltage_offset_mv,
+                                       power_management->thermal_offset_mv,
+                                       power_management->vdroop_offset_mv);
 }
 
 static float get_effective_frequency_mhz(const PowerManagementModule * power_management)
 {
-    float base_target_freq = get_dvfs_base_target_freq(power_management);
-    float total_offset = power_management->watchdog_freq_offset_mhz + power_management->thermal_offset_mhz;
-    return fmaxf(FREQ_MIN_MHZ, base_target_freq - total_offset);
+    return pcm_compute_effective_freq(power_management->dvfs_profile,
+                                      power_management->target_frequency,
+                                      power_management->dvfs_freq_offset_mhz,
+                                      power_management->thermal_offset_mhz,
+                                      power_management->watchdog_freq_offset_mhz);
 }
 
 static void reset_dvfs_state(PowerManagementModule * power_management, int64_t now_us)
@@ -435,7 +401,7 @@ static void step_dvfs_frequency(PowerManagementModule * power_management, float 
 static void step_dvfs_voltage(PowerManagementModule * power_management, int16_t delta_mv)
 {
     uint16_t cur_mv = get_dvfs_base_target_voltage_mv(power_management);
-    uint16_t next_mv = clamp_vcore_i32((int32_t) cur_mv + (int32_t) delta_mv);
+    uint16_t next_mv = pcm_clamp_vcore_mv((int32_t) cur_mv + (int32_t) delta_mv);
     if (next_mv != cur_mv) {
         power_management->dvfs_voltage_offset_mv = (int16_t) ((int32_t) next_mv - (int32_t) power_management->target_voltage);
         ESP_LOGI(TAG, "DVFS profile %u VCore step -> %u mV (offset: %+d mV)",
@@ -554,28 +520,21 @@ static void handle_vdroop_compensation(GlobalState * GLOBAL_STATE)
     power_management->last_vdroop_check_us = now_us;
 
     uint16_t base_voltage_mv = get_base_voltage_mv(power_management);
-    uint16_t max_headroom = (VCORE_MAX_MV > base_voltage_mv) ? (VCORE_MAX_MV - base_voltage_mv) : 0;
-    uint16_t max_vdroop = (max_headroom < VDROOP_MAX_OFFSET_MV) ? max_headroom : VDROOP_MAX_OFFSET_MV;
-    if (power_management->vdroop_offset_mv > max_vdroop) {
-        power_management->vdroop_offset_mv = max_vdroop;
-    }
+    uint16_t prev_offset = power_management->vdroop_offset_mv;
+    uint16_t next_offset = pcm_step_vdroop_offset_mv(prev_offset,
+                                                     base_voltage_mv,
+                                                     power_management->core_voltage,
+                                                     power_management->power);
+    power_management->vdroop_offset_mv = next_offset;
 
-    if (power_management->core_voltage < ((float) base_voltage_mv - VDROOP_DEADBAND_MV)) {
-        if (!isnan(power_management->power) && power_management->power <= MAX_POWER_W &&
-            power_management->vdroop_offset_mv < max_vdroop) {
-            uint16_t next_offset = power_management->vdroop_offset_mv + VDROOP_STEP_MV;
-            power_management->vdroop_offset_mv = (next_offset > max_vdroop) ? max_vdroop : next_offset;
-            ESP_LOGI(TAG, "Vdroop compensation +%u mV -> offset: +%u mV (measured: %.1f mV, base: %u mV)",
-                     VDROOP_STEP_MV, power_management->vdroop_offset_mv,
-                     power_management->core_voltage, base_voltage_mv);
-        }
-    } else if (power_management->core_voltage > ((float) base_voltage_mv + VDROOP_DEADBAND_MV) &&
-               power_management->vdroop_offset_mv > 0) {
-        power_management->vdroop_offset_mv = (power_management->vdroop_offset_mv >= VDROOP_STEP_MV)
-                                                 ? (power_management->vdroop_offset_mv - VDROOP_STEP_MV)
-                                                 : 0;
+    if (next_offset > prev_offset) {
+        ESP_LOGI(TAG, "Vdroop compensation +%u mV -> offset: +%u mV (measured: %.1f mV, base: %u mV)",
+                 next_offset - prev_offset, next_offset,
+                 power_management->core_voltage, base_voltage_mv);
+    } else if (next_offset < prev_offset &&
+               power_management->core_voltage > ((float) base_voltage_mv + VDROOP_DEADBAND_MV)) {
         ESP_LOGI(TAG, "Vdroop compensation -%u mV -> offset: +%u mV (measured: %.1f mV, base: %u mV)",
-                 VDROOP_STEP_MV, power_management->vdroop_offset_mv,
+                 prev_offset - next_offset, next_offset,
                  power_management->core_voltage, base_voltage_mv);
     }
 }

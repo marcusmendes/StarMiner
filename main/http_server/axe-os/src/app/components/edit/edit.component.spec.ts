@@ -88,22 +88,39 @@ describe('EditComponent', () => {
     expect(component.form.get('dvfsProfile')?.value).toBe(2);
   });
 
-  it('should save dvfsProfile changes via updateSystem without requiring restart', () => {
+  it('should fall back to frequency, coreVoltage, and Manual dvfsProfile when targets are undefined', () => {
+    const fallbackFixture = TestBed.createComponent(EditComponent);
+    const fallbackComponent = fallbackFixture.componentInstance;
+
+    const { targetFrequency, targetVoltage, dvfsProfile, ...infoWithoutTargets } = baseInfo;
+    infoSubject.next(infoWithoutTargets);
+    fallbackFixture.detectChanges();
+
+    expect(fallbackComponent.form.get('frequency')?.value).toBe(475);
+    expect(fallbackComponent.form.get('coreVoltage')?.value).toBe(1165);
+    expect(fallbackComponent.form.get('dvfsProfile')?.value).toBe(0);
+  });
+
+  it('should save dvfsProfile changes (0..3) via updateSystem without requiring restart', () => {
     const dvfsControl = component.form.get('dvfsProfile')!;
-    dvfsControl.setValue(3);
-    dvfsControl.markAsDirty();
 
-    expect(component.isRestartRequired).toBeFalse();
+    for (const profile of [0, 1, 2, 3]) {
+      systemApiSpy.updateSystem.calls.reset();
+      dvfsControl.setValue(profile);
+      dvfsControl.markAsDirty();
 
-    component.updateSystem();
+      expect(component.isRestartRequired).toBeFalse();
 
-    expect(systemApiSpy.updateSystem).toHaveBeenCalledWith(
-      '',
-      jasmine.objectContaining({
-        frequency: 550,
-        coreVoltage: 1150,
-        dvfsProfile: 3,
-      })
-    );
+      component.updateSystem();
+
+      expect(systemApiSpy.updateSystem).toHaveBeenCalledWith(
+        '',
+        jasmine.objectContaining({
+          frequency: 550,
+          coreVoltage: 1150,
+          dvfsProfile: profile,
+        })
+      );
+    }
   });
 });

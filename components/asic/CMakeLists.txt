@@ -10,6 +10,7 @@ SRCS
     "asic.c"
     "frequency_transition_bmXX.c"
     "pll.c"
+    "power_control_math.c"
 
 INCLUDE_DIRS 
     "include"

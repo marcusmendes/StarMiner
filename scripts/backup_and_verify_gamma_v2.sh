@@ -8,15 +8,15 @@ usage() {
     cat <<EOF
 Usage: ${SCRIPT_NAME} <subcommand> [options]
 
-Backup factory firmware/telemetry and audit post-flash health for StarMiner Bitaxe Gamma (601a-4 / GammaV2).
+Backup factory firmware/telemetry and audit post-flash health for StarMiner Bitaxe Gamma (601a* / GammaV2).
 
 Subcommands:
   backup-http <device_ip>       Capture raw GET /api/system/info and GET /api/system/asic JSON snapshots
                                 into BACKUP_DIR (default: backups/<YYYYMMDD-HHMMSS>/).
   backup-flash <serial_port>    Dump nvs (0x9000, 24 KB), otadata (0xf10000, 8 KB), and full 16 MB flash
                                 via esptool.py, verify exact byte sizes, and create/verify SHA256SUMS.
-  verify-post-flash <device_ip> Audit GET /api/system/info for boardVersion=="601a-4", freeHeapInternal>=110000,
-                                absence of power_fault, and all 7 Phase 4 telemetry fields.
+  verify-post-flash <device_ip> Audit GET /api/system/info for boardVersion starting with "601a" (e.g. 601a-2, 601a-4),
+                                freeHeapInternal>=110000, absence of power_fault, and all 7 Phase 4 telemetry fields.
   --help, -h, help              Show this help message and exit.
 
 Environment Variables:
@@ -247,14 +247,18 @@ phase4_fields = [
     "watchdogResets",
 ]
 
-checks = []
+checks = [
+    ("version", repr(data.get("version")), "INFO"),
+    ("axeOSVersion", repr(data.get("axeOSVersion")), "INFO"),
+    ("runningPartition", repr(data.get("runningPartition")), "INFO"),
+]
 failures = []
 
 board_version = data.get("boardVersion")
-board_ok = board_version == "601a-4"
-checks.append(("boardVersion", repr(board_version), "PASS" if board_ok else "FAIL (expected '601a-4')"))
+board_ok = isinstance(board_version, str) and board_version.startswith("601a")
+checks.append(("boardVersion", repr(board_version), "PASS" if board_ok else "FAIL (expected '601a*')"))
 if not board_ok:
-    failures.append(f"boardVersion mismatch: expected '601a-4', got {board_version!r}")
+    failures.append(f"boardVersion mismatch: expected prefix '601a', got {board_version!r}")
 
 free_heap = data.get("freeHeapInternal")
 heap_is_num = isinstance(free_heap, (int, float)) and not isinstance(free_heap, bool)

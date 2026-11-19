@@ -126,3 +126,25 @@ TEST_CASE("EMC2101 tachometer conversion guards 0x0000, 0xFFFF, and saturated RP
     // Extremely small non-zero glitch clamps to UINT16_MAX instead of wrapping
     TEST_ASSERT_EQUAL_UINT16(UINT16_MAX, pcm_emc2101_tach_to_rpm(1));
 }
+
+TEST_CASE("PID effective temperature combines ASIC max and VR - 22C offset", "[power_control][thermal]")
+{
+    // ASIC dominant when VR is cool (74.0 - 22.0 = 52.0 < 60.0)
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, 60.0f, pcm_compute_pid_effective_temp(60.0f, -1.0f, 74.0f));
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, 62.5f, pcm_compute_pid_effective_temp(59.0f, 62.5f, 80.0f));
+
+    // VR dominant when VR heats up near 90 C threshold (86.0 - 22.0 = 64.0 > 58.0)
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, 64.0f, pcm_compute_pid_effective_temp(58.0f, -1.0f, 86.0f));
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, 68.0f, pcm_compute_pid_effective_temp(60.0f, 61.0f, 90.0f));
+
+    // vr_temp <= 0 or NaN (boards without TPS546 or sensor unavailable) leaves ASIC temperature unperturbed
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, 60.0f, pcm_compute_pid_effective_temp(60.0f, -1.0f, 0.0f));
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, 60.0f, pcm_compute_pid_effective_temp(60.0f, 0.0f, -1.0f));
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, 60.0f, pcm_compute_pid_effective_temp(60.0f, NAN, NAN));
+
+    // Invalid chip1/chip2 falls back to valid chip or VR equivalent (> 0), or 0.0f when all invalid
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, 57.0f, pcm_compute_pid_effective_temp(-1.0f, 57.0f, 0.0f));
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, 64.0f, pcm_compute_pid_effective_temp(-1.0f, NAN, 86.0f));
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, 0.0f, pcm_compute_pid_effective_temp(-1.0f, 0.0f, 20.0f));
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, 0.0f, pcm_compute_pid_effective_temp(-1.0f, NAN, 0.0f));
+}

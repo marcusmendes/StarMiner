@@ -8,10 +8,14 @@
 #include "nvs_config.h"
 #include "thermal.h"
 #include "PID.h"
+#include "power_control_math.h"
 
 #define EPSILON 0.0001f
 #define POLL_TIME_MS 100
 #define LOG_TIME_MS 2000
+
+#define FAN_STALL_MIN_PWM_PERC 25.0f
+#define FAN_STALL_CYCLES       50
 
 #define PID_P 5.0
 #define PID_I 0.1
@@ -56,10 +60,12 @@ void FAN_CONTROLLER_task(void * pvParameters)
     uint16_t pid_output_min = 0;
     int log_counter = 0;
     float filtered_input = -1.0f;
+    uint16_t stall_cycles = 0;
 
     GlobalState * GLOBAL_STATE = (GlobalState *) pvParameters;
 
     PowerManagementModule * power_management = &GLOBAL_STATE->POWER_MANAGEMENT_MODULE;
+    power_management->fan_stall = false;
 
     // Initialize PID controller with pid_d_startup and PID_REVERSE directly
     pid_init(&pid, &pid_input, &pid_output, &pid_setPoint, PID_P, PID_I, PID_D, PID_P_ON_E, PID_REVERSE);
@@ -69,8 +75,12 @@ void FAN_CONTROLLER_task(void * pvParameters)
 
     while (1) {
         bool overheat_active = GLOBAL_STATE->SYSTEM_MODULE.overheat_mode || nvs_config_get_bool(NVS_CONFIG_OVERHEAT_MODE);
-        if (overheat_active || power_management->throttle_active) {
-            update_fan_speed(GLOBAL_STATE, 100.0f, overheat_active ? "Overheat" : "Throttle");
+        if (overheat_active) {
+            update_fan_speed(GLOBAL_STATE, 100.0f, "Overheat");
+        } else if (power_management->fan_stall) {
+            update_fan_speed(GLOBAL_STATE, 100.0f, "Fan Stall");
+        } else if (power_management->throttle_active) {
+            update_fan_speed(GLOBAL_STATE, 100.0f, "Throttle");
         } else if (GLOBAL_STATE->SYSTEM_MODULE.mining_paused) {
             update_fan_speed(GLOBAL_STATE, 30.0f, "Paused");
         } else if (GLOBAL_STATE->SYSTEM_MODULE.pools_unavailable) {
@@ -88,14 +98,10 @@ void FAN_CONTROLLER_task(void * pvParameters)
                     pid_set_output_limits(&pid, pid_output_min, 100);
                 }
 
-                if (power_management->chip_temp_avg > 0) { // Ignore uninitialized or invalid temperature readings
-                    float raw_temp;
-                    if (power_management->chip_temp2_avg > power_management->chip_temp_avg) {
-                        raw_temp = power_management->chip_temp2_avg;
-                    } else {
-                        raw_temp = power_management->chip_temp_avg;
-                    }
-                    
+                float raw_temp = pcm_compute_pid_effective_temp(power_management->chip_temp_avg,
+                                                                  power_management->chip_temp2_avg,
+                                                                  power_management->vr_temp);
+                if (raw_temp > 0.0f) { // Ignore uninitialized or invalid temperature readings
                     // Simple EMA filter to reduce jitter from sensor noise
                     // alpha = 0.2 means 20% new value, 80% old value
                     if (filtered_input < 0) {
@@ -121,7 +127,8 @@ void FAN_CONTROLLER_task(void * pvParameters)
                     log_counter += POLL_TIME_MS;
                     if (log_counter >= LOG_TIME_MS) {
                         log_counter -= LOG_TIME_MS;
-                        ESP_LOGI(TAG, "Temp: %.1f°C, SetPoint: %.1f°C, Output: %.1f%%", pid_input, pid_setPoint, pid_output);
+                        ESP_LOGI(TAG, "Temp: %.1f°C (ASIC: %.1f°C, VR: %.1f°C), SetPoint: %.1f°C, Output: %.1f%%",
+                                 pid_input, power_management->chip_temp_avg, power_management->vr_temp, pid_setPoint, pid_output);
                     }
                 } else {
                     update_fan_speed(GLOBAL_STATE, 70.0f, "Startup");
@@ -134,6 +141,37 @@ void FAN_CONTROLLER_task(void * pvParameters)
 
         power_management->fan_rpm = Thermal_get_fan_speed(&GLOBAL_STATE->DEVICE_CONFIG);
         power_management->fan2_rpm = Thermal_get_fan2_speed(&GLOBAL_STATE->DEVICE_CONFIG);
+
+        bool has_tach = GLOBAL_STATE->DEVICE_CONFIG.EMC2101 ||
+                        GLOBAL_STATE->DEVICE_CONFIG.EMC2103 ||
+                        GLOBAL_STATE->DEVICE_CONFIG.EMC2302;
+        bool stall_check_armed = has_tach &&
+                                 GLOBAL_STATE->ASIC_initalized &&
+                                 !GLOBAL_STATE->SYSTEM_MODULE.mining_paused &&
+                                 !GLOBAL_STATE->SYSTEM_MODULE.pools_unavailable &&
+                                 !overheat_active &&
+                                 !GLOBAL_STATE->SELF_TEST_MODULE.is_active &&
+                                 (power_management->fan_perc >= FAN_STALL_MIN_PWM_PERC);
+
+        if (stall_check_armed && power_management->fan_rpm == 0) {
+            if (stall_cycles < FAN_STALL_CYCLES) {
+                stall_cycles++;
+            }
+            if (stall_cycles >= FAN_STALL_CYCLES) {
+                if (!power_management->fan_stall) {
+                    power_management->fan_stall = true;
+                    ESP_LOGW(TAG, "Fan stall detected (0 RPM at %.1f%% PWM for 5s) - forcing 100%% PWM and soft-throttling",
+                             power_management->fan_perc);
+                }
+                update_fan_speed(GLOBAL_STATE, 100.0f, "Fan Stall");
+            }
+        } else {
+            if (power_management->fan_stall) {
+                ESP_LOGI(TAG, "Fan stall cleared (RPM: %u)", power_management->fan_rpm);
+            }
+            stall_cycles = 0;
+            power_management->fan_stall = false;
+        }
 
         vTaskDelayUntil(&taskWakeTime, POLL_TIME_MS / portTICK_PERIOD_MS);
     }

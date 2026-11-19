@@ -30,6 +30,7 @@ typedef struct
     uint16_t target_voltage;
     uint16_t actual_voltage_mv;
     bool throttle_active;
+    bool fan_stall;
     float thermal_offset_mhz;
     uint16_t thermal_offset_mv;
     int64_t last_throttle_step_us;

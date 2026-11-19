@@ -627,13 +627,14 @@ static void handle_thermal_state_machine(GlobalState * GLOBAL_STATE, bool * prev
         return;
     }
 
-    // 3. Soft-Throttling Zone (ASIC >= 68 C, VR >= 90 C, or Power > 32 W)
+    // 3. Soft-Throttling Zone (ASIC >= 68 C, VR >= 90 C, Power > 32 W, or Fan Stall)
     bool asic_soft = (chip1_valid && chip1 >= ASIC_SOFT_THROTTLE_TEMP) ||
                      (chip2_valid && chip2 >= ASIC_SOFT_THROTTLE_TEMP);
     bool vr_soft = vr_valid && vr >= VR_SOFT_THROTTLE_TEMP;
     bool power_over = power_valid && power > MAX_POWER_W;
+    bool fan_stalled = power_management->fan_stall;
 
-    if (asic_soft || vr_soft || power_over) {
+    if (asic_soft || vr_soft || power_over || fan_stalled) {
         bool was_throttle_active = power_management->throttle_active;
         power_management->throttle_active = true;
         power_management->safe_zone_since_us = 0;
@@ -643,8 +644,8 @@ static void handle_thermal_state_machine(GlobalState * GLOBAL_STATE, bool * prev
                 reset_vdroop_state(power_management);
             }
             power_management->last_throttle_step_us = now_us;
-            ESP_LOGW(TAG, "Soft-throttling activated (ASIC: %.1fC, VR: %.1fC, Power: %.1fW) - fan forced to 100%% in RAM",
-                     chip1, vr, power);
+            ESP_LOGW(TAG, "Soft-throttling activated (ASIC: %.1fC, VR: %.1fC, Power: %.1fW, FanStall: %d) - fan forced to 100%% in RAM",
+                     chip1, vr, power, fan_stalled ? 1 : 0);
             return;
         }
 
@@ -669,19 +670,20 @@ static void handle_thermal_state_machine(GlobalState * GLOBAL_STATE, bool * prev
 
             float eff_freq = get_effective_frequency_mhz(power_management);
             uint16_t eff_vcore = get_effective_voltage_mv(power_management);
-            ESP_LOGW(TAG, "Soft-throttling step-down (ASIC: %.1fC, VR: %.1fC, Power: %.1fW) -> %.1f MHz / %u mV",
-                     chip1, vr, power, eff_freq, eff_vcore);
+            ESP_LOGW(TAG, "Soft-throttling step-down (ASIC: %.1fC, VR: %.1fC, Power: %.1fW, FanStall: %d) -> %.1f MHz / %u mV",
+                     chip1, vr, power, fan_stalled ? 1 : 0, eff_freq, eff_vcore);
         }
         return;
     }
 
-    // 4. Hysteresis Recovery Zone (ASIC < 65 C, VR < 85 C, Power <= 32 W continuously for 30 s)
+    // 4. Hysteresis Recovery Zone (ASIC < 65 C, VR < 85 C, Power <= 32 W, no Fan Stall continuously for 30 s)
     if (power_management->throttle_active) {
         bool asic_safe = are_asic_temps_below(chip1, chip2, ASIC_SAFE_RECOVERY_TEMP);
         bool vr_safe = is_vr_temp_valid(GLOBAL_STATE, vr) && vr < VR_SAFE_RECOVERY_TEMP;
         bool power_safe = power_valid && power <= MAX_POWER_W;
+        bool fan_safe = !power_management->fan_stall;
 
-        if (!(asic_safe && vr_safe && power_safe)) {
+        if (!(asic_safe && vr_safe && power_safe && fan_safe)) {
             power_management->safe_zone_since_us = 0;
             return;
         }
@@ -731,6 +733,7 @@ void POWER_MANAGEMENT_task(void * pvParameters)
                                            ? GLOBAL_STATE->DEVICE_CONFIG.family.asic.default_voltage_mv
                                            : nvs_config_get_u16(NVS_CONFIG_ASIC_VOLTAGE);
     power_management->actual_voltage_mv = 0;
+    power_management->fan_stall = false;
     reset_thermal_throttle_state(power_management);
     reset_vdroop_state(power_management);
     reset_dvfs_state(power_management, esp_timer_get_time());

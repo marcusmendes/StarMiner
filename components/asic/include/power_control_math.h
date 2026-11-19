@@ -26,6 +26,7 @@ extern "C" {
 #define PCM_DVFS_PERFORMANCE_MAX_FREQ_MHZ 675.0f
 
 #define PCM_EMC2101_FAN_RPM_NUMERATOR 5400000U
+#define PCM_VR_TO_ASIC_TEMP_OFFSET_C  22.0f
 
 typedef enum {
     PCM_DVFS_PROFILE_MANUAL = 0,
@@ -82,6 +83,14 @@ uint16_t pcm_step_vdroop_offset_mv(uint16_t current_offset_mv,
  * Returns 0 for invalid/stalled readings (0x0000, 0xFFFF, or saturated RPM == 82).
  */
 uint16_t pcm_emc2101_tach_to_rpm(uint16_t reading);
+
+/**
+ * @brief Computes composite virtual temperature for the fan PID controller:
+ *        max(valid ASIC temps, vr_temp - 22.0 C) when vr_temp > 0 C.
+ *
+ * Returns 0.0f when no valid positive temperature is available.
+ */
+float pcm_compute_pid_effective_temp(float chip1_temp, float chip2_temp, float vr_temp);
 
 #ifdef __cplusplus
 }

@@ -121,3 +121,23 @@ uint16_t pcm_emc2101_tach_to_rpm(uint16_t reading)
     }
     return (uint16_t) rpm;
 }
+
+float pcm_compute_pid_effective_temp(float chip1_temp, float chip2_temp, float vr_temp)
+{
+    float effective_temp = 0.0f;
+
+    if (!isnan(chip1_temp) && chip1_temp > 0.0f) {
+        effective_temp = chip1_temp;
+    }
+    if (!isnan(chip2_temp) && chip2_temp > 0.0f) {
+        effective_temp = fmaxf(effective_temp, chip2_temp);
+    }
+    if (!isnan(vr_temp) && vr_temp > 0.0f) {
+        float vr_equiv = vr_temp - PCM_VR_TO_ASIC_TEMP_OFFSET_C;
+        if (vr_equiv > effective_temp) {
+            effective_temp = vr_equiv;
+        }
+    }
+
+    return effective_temp;
+}

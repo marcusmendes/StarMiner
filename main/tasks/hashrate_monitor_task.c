@@ -8,6 +8,7 @@
 #include "asic_common.h"
 #include "asic.h"
 #include "utils.h"
+#include "power_control_math.h"
 
 #define EPSILON 0.0001f
 
@@ -293,6 +294,7 @@ void hashrate_monitor_task(void *pvParameters)
             if (zero_hashrate_accum_us >= WATCHDOG_ZERO_HASHRATE_US) {
                 ESP_LOGW(TAG, "ASIC Watchdog triggered: total hashrate at 0.0 GH/s for %lld s",
                          (long long)(zero_hashrate_accum_us / 1000000LL));
+                GLOBAL_STATE->POWER_MANAGEMENT_MODULE.watchdog_trigger_reason = PCM_WATCHDOG_REASON_ZERO_HASHRATE;
                 GLOBAL_STATE->POWER_MANAGEMENT_MODULE.asic_watchdog_trigger = true;
                 zero_hashrate_accum_us = 0;
                 domain_freeze_accum_us = 0;
@@ -301,6 +303,7 @@ void hashrate_monitor_task(void *pvParameters)
                 ESP_LOGW(TAG, "ASIC Watchdog triggered: ASIC %d domain %d frozen (%.2f GH/s < 10%% of %.2f GH/s avg) for %lld s",
                          frozen_asic, frozen_domain, frozen_hr, frozen_other_avg,
                          (long long)(domain_freeze_accum_us / 1000000LL));
+                GLOBAL_STATE->POWER_MANAGEMENT_MODULE.watchdog_trigger_reason = PCM_WATCHDOG_REASON_FROZEN_DOMAIN;
                 GLOBAL_STATE->POWER_MANAGEMENT_MODULE.asic_watchdog_trigger = true;
                 zero_hashrate_accum_us = 0;
                 domain_freeze_accum_us = 0;

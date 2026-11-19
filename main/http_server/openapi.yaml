@@ -228,6 +228,9 @@ components:
         - dvfsProfile
         - cmlErrorCount
         - watchdogResets
+        - lastWatchdogReason
+        - learnedMaxFreq
+        - learnedMinVcore
       properties:
         ASICModel:
           type: string
@@ -592,6 +595,17 @@ components:
         watchdogResets:
           type: integer
           description: Number of ASIC/domain watchdog recoveries in current session
+        lastWatchdogReason:
+          type: integer
+          minimum: 0
+          maximum: 3
+          description: Cause of the last ASIC watchdog trigger (0=None, 1=Zero Hashrate, 2=Frozen Domain, 3=Level 3 Reboot)
+        learnedMaxFreq:
+          type: number
+          description: Per-chip DVFS learned maximum frequency ceiling in MHz (0=unlocked)
+        learnedMinVcore:
+          type: integer
+          description: Per-chip DVFS learned minimum VCore floor in mV (0=unlocked)
 
     SystemASIC:
       type: object

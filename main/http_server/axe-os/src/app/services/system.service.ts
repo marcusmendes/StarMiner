@@ -175,6 +175,9 @@ export class SystemApiService {
         dvfsProfile: 0,
         cmlErrorCount: 0,
         watchdogResets: 0,
+        lastWatchdogReason: 0,
+        learnedMaxFreq: 0,
+        learnedMinVcore: 0,
       }
     ).pipe(delay(1000));
   }

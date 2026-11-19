@@ -64,7 +64,12 @@ export class SwarmComponent implements OnInit, OnDestroy {
   public refreshIntervalTime = 30;
   public refreshTimeSet = 30;
 
-  public totals: { hashRate: number; power: number; bestDiff: number } = { hashRate: 0, power: 0, bestDiff: 0 };
+  public totals: { hashRate: number; power: number; bestDiff: number; efficiency: number } = {
+    hashRate: 0,
+    power: 0,
+    bestDiff: 0,
+    efficiency: 0,
+  };
 
   public isRefreshing = false;
 
@@ -449,6 +454,13 @@ private isIpAddress(value: string): boolean {
   }
 
   private sortSwarm() {
+    if (this.selectedSort.sortField === 'efficiency') {
+      this.swarm.forEach(axe => {
+        if (axe) {
+          axe.efficiency = this.getDeviceEfficiency(axe);
+        }
+      });
+    }
     this.swarm.sort((a, b) => {
       let comparison = 0;
       const aVal = a[this.selectedSort.sortField];
@@ -485,9 +497,53 @@ private isIpAddress(value: string): boolean {
   }
 
   private calculateTotals() {
+    this.swarm.forEach(axe => {
+      if (axe) {
+        axe.efficiency = this.getDeviceEfficiency(axe);
+      }
+    });
     this.totals.hashRate = this.swarm.reduce((sum, axe) => sum + (axe.hashRate || 0), 0);
     this.totals.power = this.swarm.reduce((sum, axe) => sum + (axe.power || 0), 0);
     this.totals.bestDiff = this.swarm.reduce((max, axe) => Math.max(max, axe.bestDiff || 0), 0);
+    this.totals.efficiency = this.totals.hashRate > 0 ? (this.totals.power / (this.totals.hashRate / 1000)) : 0;
+  }
+
+  public getDeviceEfficiency(axe: any): number {
+    const hashRate = axe?.hashRate || 0;
+    const power = axe?.power || 0;
+    if (axe?.power_fault || hashRate <= 0 || power <= 0) {
+      return 0;
+    }
+    return power / (hashRate / 1000);
+  }
+
+  public getDvfsProfileLabel(profile?: number): string {
+    switch (profile) {
+      case 1: return 'Efficiency';
+      case 2: return 'Balanced';
+      case 3: return 'Performance';
+      default: return 'Manual';
+    }
+  }
+
+  public getDvfsProfileBadgeClass(profile?: number): string {
+    switch (profile) {
+      case 1: return 'p-badge-success';
+      case 2: return 'p-badge-info';
+      case 3: return 'p-badge-warning';
+      default: return 'p-badge-secondary';
+    }
+  }
+
+  public getLearnedBoundsTooltip(axe: any): string {
+    const parts: string[] = [];
+    if ((axe?.learnedMaxFreq ?? 0) > 0) {
+      parts.push(`Max Freq: ${axe.learnedMaxFreq} MHz`);
+    }
+    if ((axe?.learnedMinVcore ?? 0) > 0) {
+      parts.push(`Min VCore: ${axe.learnedMinVcore} mV`);
+    }
+    return parts.length ? `Learned silicon bounds (${parts.join(', ')})` : '';
   }
 
   get deviceFamilies(): SwarmDevice[] {
@@ -608,6 +664,8 @@ private isIpAddress(value: string): boolean {
       { label: 'Address', value: { sortField: 'address', sortDirection: 'asc' } },
       { label: 'Hashrate', value: { sortField: 'hashRate', sortDirection: 'desc' } },
       { label: 'Hashrate', value: { sortField: 'hashRate', sortDirection: 'asc' } },
+      { label: 'Efficiency', value: { sortField: 'efficiency', sortDirection: 'asc' } },
+      { label: 'Efficiency', value: { sortField: 'efficiency', sortDirection: 'desc' } },
       { label: 'Shares', value: { sortField: 'sharesAccepted', sortDirection: 'desc' } },
       { label: 'Shares', value: { sortField: 'sharesAccepted', sortDirection: 'asc' } },
       { label: 'Best Diff', value: { sortField: 'bestDiff', sortDirection: 'desc' } },
@@ -646,18 +704,23 @@ return this.swarm.filter(axe =>
   }
 
   getDeviceNotification(axe: any): { color: string; msg: string } | undefined {
+    const targetFreq = axe?.targetFrequency ?? axe?.frequency;
     switch (true) {
-      case !!axe.miningPaused:
+      case !!axe?.miningPaused:
         return { color: 'yellow', msg: 'Paused' };
-      case axe.overheat_mode === 1:
+      case axe?.overheat_mode === 1:
         return { color: 'red', msg: 'Overheated' };
-      case !!axe.power_fault:
+      case !!axe?.power_fault:
         return { color: 'red', msg: 'Power Fault' };
-      case !axe.frequency || axe.frequency < 400:
+      case axe?.throttleActive === 1:
+        return { color: 'orange', msg: 'Thermal Throttling' };
+      case !targetFreq || targetFreq < 400:
         return { color: 'orange', msg: 'Frequency Low' };
-      case axe.isUsingFallbackStratum === 1:
+      case (axe?.watchdogResets ?? 0) > 0:
+        return { color: 'orange', msg: 'Watchdog Resets' };
+      case axe?.isUsingFallbackStratum === 1:
         return { color: 'orange', msg: 'Fallback Pool' };
-      case axe.showNewBlock === 1:
+      case !!axe?.showNewBlock:
         return { color: 'green', msg: 'Block found' };
       default:
         return undefined;

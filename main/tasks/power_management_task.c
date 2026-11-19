@@ -1,4 +1,5 @@
 #include <math.h>
+#include "esp_attr.h"
 #include "esp_log.h"
 #include "esp_system.h"
 #include "esp_timer.h"
@@ -67,6 +68,21 @@ typedef enum {
 } DvfsProfile;
 
 static const char * TAG = "power_management";
+
+static RTC_NOINIT_ATTR PcmRtcDiagnostics s_rtc_diag;
+
+static void sync_rtc_diagnostics(const PowerManagementModule * power_management)
+{
+    s_rtc_diag.watchdog_resets = power_management->watchdog_resets;
+    s_rtc_diag.cml_error_count = power_management->cml_error_count;
+    s_rtc_diag.last_watchdog_reason = power_management->last_watchdog_reason;
+    s_rtc_diag.learned_max_freq_mhz = power_management->learned_max_freq_mhz;
+    s_rtc_diag.learned_min_vcore_mv = power_management->learned_min_vcore_mv;
+    pcm_rtc_diag_seal(&s_rtc_diag,
+                      power_management->target_frequency,
+                      power_management->target_voltage,
+                      power_management->dvfs_profile);
+}
 
 static bool is_valid_temp(float temp)
 {
@@ -255,6 +271,11 @@ static void handle_asic_watchdog(GlobalState * GLOBAL_STATE)
     PowerManagementModule * power_management = &GLOBAL_STATE->POWER_MANAGEMENT_MODULE;
     int64_t now_us = esp_timer_get_time();
 
+    if (power_management->watchdog_trigger_reason != PCM_WATCHDOG_REASON_NONE) {
+        power_management->last_watchdog_reason = power_management->watchdog_trigger_reason;
+        power_management->watchdog_trigger_reason = PCM_WATCHDOG_REASON_NONE;
+    }
+
     if (power_management->watchdog_last_failure_us > 0 &&
         (now_us - power_management->watchdog_last_failure_us) < WATCHDOG_FAILURE_WINDOW_US) {
         power_management->watchdog_consecutive_failures++;
@@ -264,6 +285,9 @@ static void handle_asic_watchdog(GlobalState * GLOBAL_STATE)
     power_management->watchdog_last_failure_us = now_us;
 
     if (power_management->watchdog_consecutive_failures >= 4) {
+        power_management->watchdog_resets++;
+        power_management->last_watchdog_reason = PCM_WATCHDOG_REASON_LEVEL3_REBOOT;
+        sync_rtc_diagnostics(power_management);
         ESP_LOGE(TAG, "ASIC Watchdog Level 3 (%u consecutive failures in <10 min) - restarting system",
                  power_management->watchdog_consecutive_failures);
         vTaskDelay(pdMS_TO_TICKS(100));
@@ -305,6 +329,7 @@ static void handle_asic_watchdog(GlobalState * GLOBAL_STATE)
     vTaskDelay(pdMS_TO_TICKS(WATCHDOG_RECOVERY_DELAY_MS));
     mining_start(GLOBAL_STATE);
     power_management->watchdog_resets++;
+    sync_rtc_diagnostics(power_management);
 }
 
 void POWER_MANAGEMENT_init_frequency(void * pvParameters)
@@ -491,6 +516,11 @@ static void handle_dvfs_autotuner(GlobalState * GLOBAL_STATE)
     } else if (fabsf(power_management->learned_max_freq_mhz - prev_learned_freq) > 0.001f) {
         ESP_LOGI(TAG, "DVFS profile %u locked learned max frequency -> %.1f MHz",
                  power_management->dvfs_profile, power_management->learned_max_freq_mhz);
+    }
+
+    if (power_management->learned_min_vcore_mv != prev_learned_mv ||
+        fabsf(power_management->learned_max_freq_mhz - prev_learned_freq) > 0.001f) {
+        sync_rtc_diagnostics(power_management);
     }
 }
 
@@ -738,6 +768,34 @@ void POWER_MANAGEMENT_task(void * pvParameters)
 
     POWER_MANAGEMENT_init_frequency(GLOBAL_STATE);
 
+    bool is_poweron = (esp_reset_reason() == ESP_RST_POWERON);
+    if (pcm_rtc_diag_restore_or_reset(&s_rtc_diag,
+                                      is_poweron,
+                                      power_management->target_frequency,
+                                      power_management->target_voltage,
+                                      power_management->dvfs_profile)) {
+        power_management->watchdog_resets = s_rtc_diag.watchdog_resets;
+        power_management->cml_error_count = s_rtc_diag.cml_error_count;
+        power_management->last_watchdog_reason = s_rtc_diag.last_watchdog_reason;
+        power_management->watchdog_trigger_reason = PCM_WATCHDOG_REASON_NONE;
+        power_management->learned_max_freq_mhz = s_rtc_diag.learned_max_freq_mhz;
+        power_management->learned_min_vcore_mv = s_rtc_diag.learned_min_vcore_mv;
+        ESP_LOGI(TAG,
+                 "Restored RTC diagnostics after warm reset: watchdog_resets=%lu, last_reason=%u, cml_errors=%lu, learned_max_freq=%.1f MHz, learned_min_vcore=%u mV",
+                 (unsigned long) power_management->watchdog_resets,
+                 power_management->last_watchdog_reason,
+                 (unsigned long) power_management->cml_error_count,
+                 power_management->learned_max_freq_mhz,
+                 power_management->learned_min_vcore_mv);
+    } else {
+        power_management->watchdog_resets = 0;
+        power_management->cml_error_count = 0;
+        power_management->last_watchdog_reason = PCM_WATCHDOG_REASON_NONE;
+        power_management->watchdog_trigger_reason = PCM_WATCHDOG_REASON_NONE;
+        power_management->learned_max_freq_mhz = 0.0f;
+        power_management->learned_min_vcore_mv = 0;
+    }
+
     float last_nvs_asic_frequency = power_management->target_frequency;
     uint16_t last_nvs_asic_voltage = power_management->target_voltage;
     uint16_t last_nvs_dvfs_profile = power_management->dvfs_profile;
@@ -804,6 +862,7 @@ void POWER_MANAGEMENT_task(void * pvParameters)
         }
         if (freq_changed || volt_changed || profile_changed) {
             reset_dvfs_state(power_management, now_us);
+            sync_rtc_diagnostics(power_management);
         }
         clamp_thermal_offsets_to_headroom(power_management);
 
@@ -837,9 +896,15 @@ void POWER_MANAGEMENT_task(void * pvParameters)
             apply_effective_power_and_freq(GLOBAL_STATE);
         } else {
             reset_dvfs_state(power_management, esp_timer_get_time());
+            if (s_rtc_diag.learned_max_freq_mhz != 0.0f || s_rtc_diag.learned_min_vcore_mv != 0) {
+                sync_rtc_diagnostics(power_management);
+            }
         }
 
         VCORE_check_fault(GLOBAL_STATE);
+        if (power_management->cml_error_count != s_rtc_diag.cml_error_count) {
+            sync_rtc_diagnostics(power_management);
+        }
 
         if (power_management->asic_watchdog_trigger) {
             power_management->asic_watchdog_trigger = false;

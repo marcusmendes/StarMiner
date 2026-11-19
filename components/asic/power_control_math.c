@@ -2,6 +2,7 @@
 
 #include <math.h>
 #include <stddef.h>
+#include <string.h>
 
 uint16_t pcm_clamp_vcore_mv(int32_t voltage_mv)
 {
@@ -393,4 +394,89 @@ float pcm_compute_pid_effective_temp(float chip1_temp, float chip2_temp, float v
     }
 
     return effective_temp;
+}
+
+static uint32_t pcm_crc32_bytes(const uint8_t * data, size_t len)
+{
+    uint32_t crc = 0xFFFFFFFFU;
+    for (size_t i = 0; i < len; i++) {
+        crc ^= (uint32_t) data[i];
+        for (int bit = 0; bit < 8; bit++) {
+            uint32_t mask = (uint32_t) -(int32_t) (crc & 1U);
+            crc = (crc >> 1) ^ (0xEDB88320U & mask);
+        }
+    }
+    return ~crc;
+}
+
+static uint32_t pcm_rtc_diag_compute_crc32(const PcmRtcDiagnostics * diag)
+{
+    PcmRtcDiagnostics copy;
+    memcpy(&copy, diag, sizeof(copy));
+    copy.crc32 = 0;
+    copy.reserved = 0;
+    return pcm_crc32_bytes((const uint8_t *) &copy, sizeof(copy));
+}
+
+void pcm_rtc_diag_seal(PcmRtcDiagnostics * diag,
+                       float target_frequency_mhz,
+                       uint16_t target_voltage_mv,
+                       uint16_t dvfs_profile)
+{
+    if (diag == NULL) {
+        return;
+    }
+
+    diag->magic = PCM_RTC_DIAG_MAGIC;
+    diag->target_frequency_mhz = target_frequency_mhz;
+    diag->target_voltage_mv = target_voltage_mv;
+    diag->dvfs_profile = dvfs_profile;
+    diag->reserved = 0;
+    diag->crc32 = 0;
+    diag->crc32 = pcm_rtc_diag_compute_crc32(diag);
+}
+
+bool pcm_rtc_diag_validate(const PcmRtcDiagnostics * diag,
+                           float target_frequency_mhz,
+                           uint16_t target_voltage_mv,
+                           uint16_t dvfs_profile)
+{
+    if (diag == NULL || diag->magic != PCM_RTC_DIAG_MAGIC || diag->reserved != 0) {
+        return false;
+    }
+    if (isnan(diag->target_frequency_mhz) || isnan(target_frequency_mhz) ||
+        fabsf(diag->target_frequency_mhz - target_frequency_mhz) > 0.001f) {
+        return false;
+    }
+    if (diag->target_voltage_mv != target_voltage_mv || diag->dvfs_profile != dvfs_profile) {
+        return false;
+    }
+    if (diag->last_watchdog_reason > PCM_WATCHDOG_REASON_LEVEL3_REBOOT) {
+        return false;
+    }
+    if (isnan(diag->learned_max_freq_mhz) || diag->learned_max_freq_mhz < 0.0f) {
+        return false;
+    }
+
+    return pcm_rtc_diag_compute_crc32(diag) == diag->crc32;
+}
+
+bool pcm_rtc_diag_restore_or_reset(PcmRtcDiagnostics * diag,
+                                   bool is_poweron_reset,
+                                   float target_frequency_mhz,
+                                   uint16_t target_voltage_mv,
+                                   uint16_t dvfs_profile)
+{
+    if (diag == NULL) {
+        return false;
+    }
+
+    if (!is_poweron_reset &&
+        pcm_rtc_diag_validate(diag, target_frequency_mhz, target_voltage_mv, dvfs_profile)) {
+        return true;
+    }
+
+    memset(diag, 0, sizeof(*diag));
+    pcm_rtc_diag_seal(diag, target_frequency_mhz, target_voltage_mv, dvfs_profile);
+    return false;
 }

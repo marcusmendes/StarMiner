@@ -22,6 +22,8 @@ typedef struct
     uint32_t cml_error_count;
     uint32_t watchdog_resets;
     volatile bool asic_watchdog_trigger;
+    uint8_t watchdog_trigger_reason;
+    uint8_t last_watchdog_reason;
     uint8_t watchdog_consecutive_failures;
     int64_t watchdog_last_failure_us;
     int64_t last_freq_change_us;

@@ -48,6 +48,29 @@ extern "C" {
 #define PCM_EMC2101_FAN_RPM_NUMERATOR 5400000U
 #define PCM_VR_TO_ASIC_TEMP_OFFSET_C  22.0f
 
+#define PCM_RTC_DIAG_MAGIC 0x53545244U /* "STRD" */
+
+typedef enum {
+    PCM_WATCHDOG_REASON_NONE = 0,
+    PCM_WATCHDOG_REASON_ZERO_HASHRATE = 1,
+    PCM_WATCHDOG_REASON_FROZEN_DOMAIN = 2,
+    PCM_WATCHDOG_REASON_LEVEL3_REBOOT = 3,
+} PcmWatchdogReason;
+
+typedef struct {
+    uint32_t magic;
+    uint32_t crc32;
+    uint16_t target_voltage_mv;
+    uint16_t dvfs_profile;
+    float target_frequency_mhz;
+    uint32_t watchdog_resets;
+    uint32_t cml_error_count;
+    uint16_t learned_min_vcore_mv;
+    uint8_t last_watchdog_reason;
+    uint8_t reserved;
+    float learned_max_freq_mhz;
+} PcmRtcDiagnostics;
+
 typedef enum {
     PCM_DVFS_PROFILE_MANUAL = 0,
     PCM_DVFS_PROFILE_EFFICIENCY = 1,
@@ -185,6 +208,34 @@ uint16_t pcm_emc2101_tach_to_rpm(uint16_t reading);
  * Returns 0.0f when no valid positive temperature is available.
  */
 float pcm_compute_pid_effective_temp(float chip1_temp, float chip2_temp, float vr_temp);
+
+/**
+ * @brief Populates magic, NVS target fingerprint, and CRC32 for an RTC diagnostics block.
+ */
+void pcm_rtc_diag_seal(PcmRtcDiagnostics * diag,
+                       float target_frequency_mhz,
+                       uint16_t target_voltage_mv,
+                       uint16_t dvfs_profile);
+
+/**
+ * @brief Validates magic, NVS target fingerprint, value bounds, and CRC32 of an RTC diagnostics block.
+ */
+bool pcm_rtc_diag_validate(const PcmRtcDiagnostics * diag,
+                           float target_frequency_mhz,
+                           uint16_t target_voltage_mv,
+                           uint16_t dvfs_profile);
+
+/**
+ * @brief Validates and preserves RTC diagnostics on warm reset (!is_poweron_reset), or zeroes
+ *        and seals a clean record on cold boot (ESP_RST_POWERON), CRC corruption, or NVS target change.
+ *
+ * @return true if existing state was valid and preserved, false if reset to zero.
+ */
+bool pcm_rtc_diag_restore_or_reset(PcmRtcDiagnostics * diag,
+                                   bool is_poweron_reset,
+                                   float target_frequency_mhz,
+                                   uint16_t target_voltage_mv,
+                                   uint16_t dvfs_profile);
 
 #ifdef __cplusplus
 }

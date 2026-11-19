@@ -1,4 +1,6 @@
 #include <math.h>
+#include <string.h>
+#include "esp_system.h"
 #include "unity.h"
 
 #include "power_control_math.h"
@@ -393,4 +395,79 @@ TEST_CASE("Watchdog Level 1/2 coordinates with DVFS learned limits and reset res
                                                              PCM_DVFS_PERFORMANCE_MAX_FREQ_MHZ,
                                                              learned_max_freq));
     TEST_ASSERT_EQUAL_UINT16(PCM_VCORE_MIN_MV, pcm_dvfs_effective_vcore_floor(learned_min_vcore));
+}
+
+TEST_CASE("RTC diagnostics seal and validate across warm reset, ESP_RST_POWERON, CRC corruption, and NVS change", "[power_control][rtc]")
+{
+    PcmRtcDiagnostics diag;
+    memset(&diag, 0, sizeof(diag));
+
+    diag.watchdog_resets = 3;
+    diag.cml_error_count = 7;
+    diag.last_watchdog_reason = PCM_WATCHDOG_REASON_FROZEN_DOMAIN;
+    diag.learned_max_freq_mhz = 612.5f;
+    diag.learned_min_vcore_mv = 1160;
+    pcm_rtc_diag_seal(&diag, 550.0f, 1150, PCM_DVFS_PROFILE_BALANCED);
+
+    TEST_ASSERT_EQUAL_UINT32(PCM_RTC_DIAG_MAGIC, diag.magic);
+    TEST_ASSERT_TRUE(pcm_rtc_diag_validate(&diag, 550.0f, 1150, PCM_DVFS_PROFILE_BALANCED));
+
+    // Warm reset (e.g., esp_restart() -> ESP_RST_SW): state must be preserved
+    esp_reset_reason_t reason = ESP_RST_SW;
+    TEST_ASSERT_TRUE(pcm_rtc_diag_restore_or_reset(&diag, reason == ESP_RST_POWERON, 550.0f, 1150, PCM_DVFS_PROFILE_BALANCED));
+    TEST_ASSERT_EQUAL_UINT32(3, diag.watchdog_resets);
+    TEST_ASSERT_EQUAL_UINT32(7, diag.cml_error_count);
+    TEST_ASSERT_EQUAL_UINT8(PCM_WATCHDOG_REASON_FROZEN_DOMAIN, diag.last_watchdog_reason);
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, 612.5f, diag.learned_max_freq_mhz);
+    TEST_ASSERT_EQUAL_UINT16(1160, diag.learned_min_vcore_mv);
+
+    // NVS target change (frequency, voltage, or DVFS profile): must invalidate and reset
+    TEST_ASSERT_FALSE(pcm_rtc_diag_validate(&diag, 575.0f, 1150, PCM_DVFS_PROFILE_BALANCED));
+    TEST_ASSERT_FALSE(pcm_rtc_diag_validate(&diag, 550.0f, 1160, PCM_DVFS_PROFILE_BALANCED));
+    TEST_ASSERT_FALSE(pcm_rtc_diag_validate(&diag, 550.0f, 1150, PCM_DVFS_PROFILE_PERFORMANCE));
+    TEST_ASSERT_FALSE(pcm_rtc_diag_restore_or_reset(&diag, false, 575.0f, 1150, PCM_DVFS_PROFILE_BALANCED));
+    TEST_ASSERT_EQUAL_UINT32(0, diag.watchdog_resets);
+    TEST_ASSERT_EQUAL_UINT32(0, diag.cml_error_count);
+    TEST_ASSERT_EQUAL_UINT8(PCM_WATCHDOG_REASON_NONE, diag.last_watchdog_reason);
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, 0.0f, diag.learned_max_freq_mhz);
+    TEST_ASSERT_EQUAL_UINT16(0, diag.learned_min_vcore_mv);
+    TEST_ASSERT_TRUE(pcm_rtc_diag_validate(&diag, 575.0f, 1150, PCM_DVFS_PROFILE_BALANCED));
+
+    // Corrupted CRC32 or payload byte: must fail validation and reset cleanly
+    diag.watchdog_resets = 2;
+    diag.cml_error_count = 4;
+    diag.last_watchdog_reason = PCM_WATCHDOG_REASON_ZERO_HASHRATE;
+    diag.learned_max_freq_mhz = 600.0f;
+    diag.learned_min_vcore_mv = 1145;
+    pcm_rtc_diag_seal(&diag, 550.0f, 1150, PCM_DVFS_PROFILE_BALANCED);
+    diag.crc32 ^= 0x00010000U;
+    TEST_ASSERT_FALSE(pcm_rtc_diag_validate(&diag, 550.0f, 1150, PCM_DVFS_PROFILE_BALANCED));
+    TEST_ASSERT_FALSE(pcm_rtc_diag_restore_or_reset(&diag, false, 550.0f, 1150, PCM_DVFS_PROFILE_BALANCED));
+    TEST_ASSERT_EQUAL_UINT32(0, diag.watchdog_resets);
+    TEST_ASSERT_EQUAL_UINT32(0, diag.cml_error_count);
+
+    // Payload byte corruption with original CRC intact
+    diag.watchdog_resets = 1;
+    pcm_rtc_diag_seal(&diag, 550.0f, 1150, PCM_DVFS_PROFILE_BALANCED);
+    diag.cml_error_count = 99;
+    TEST_ASSERT_FALSE(pcm_rtc_diag_validate(&diag, 550.0f, 1150, PCM_DVFS_PROFILE_BALANCED));
+    TEST_ASSERT_FALSE(pcm_rtc_diag_restore_or_reset(&diag, false, 550.0f, 1150, PCM_DVFS_PROFILE_BALANCED));
+    TEST_ASSERT_EQUAL_UINT32(0, diag.watchdog_resets);
+    TEST_ASSERT_EQUAL_UINT32(0, diag.cml_error_count);
+
+    // Cold boot (ESP_RST_POWERON): must discard even a valid RTC block
+    diag.watchdog_resets = 5;
+    diag.cml_error_count = 11;
+    diag.last_watchdog_reason = PCM_WATCHDOG_REASON_LEVEL3_REBOOT;
+    diag.learned_max_freq_mhz = 625.0f;
+    diag.learned_min_vcore_mv = 1180;
+    pcm_rtc_diag_seal(&diag, 550.0f, 1150, PCM_DVFS_PROFILE_PERFORMANCE);
+    reason = ESP_RST_POWERON;
+    TEST_ASSERT_FALSE(pcm_rtc_diag_restore_or_reset(&diag, reason == ESP_RST_POWERON, 550.0f, 1150, PCM_DVFS_PROFILE_PERFORMANCE));
+    TEST_ASSERT_EQUAL_UINT32(0, diag.watchdog_resets);
+    TEST_ASSERT_EQUAL_UINT32(0, diag.cml_error_count);
+    TEST_ASSERT_EQUAL_UINT8(PCM_WATCHDOG_REASON_NONE, diag.last_watchdog_reason);
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, 0.0f, diag.learned_max_freq_mhz);
+    TEST_ASSERT_EQUAL_UINT16(0, diag.learned_min_vcore_mv);
+    TEST_ASSERT_TRUE(pcm_rtc_diag_validate(&diag, 550.0f, 1150, PCM_DVFS_PROFILE_PERFORMANCE));
 }

@@ -40,6 +40,8 @@ typedef struct
     uint16_t dvfs_profile;
     float dvfs_freq_offset_mhz;
     int16_t dvfs_voltage_offset_mv;
+    float learned_max_freq_mhz;
+    uint16_t learned_min_vcore_mv;
     int64_t last_dvfs_step_us;
 } PowerManagementModule;
 

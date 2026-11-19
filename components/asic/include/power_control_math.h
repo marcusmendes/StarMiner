@@ -25,6 +25,26 @@ extern "C" {
 #define PCM_DVFS_PERFORMANCE_MIN_FREQ_MHZ 550.0f
 #define PCM_DVFS_PERFORMANCE_MAX_FREQ_MHZ 675.0f
 
+#define PCM_DVFS_FREQ_STEP_MHZ            12.5f
+#define PCM_DVFS_VCORE_STEP_DOWN_MV       5
+#define PCM_DVFS_VCORE_STEP_UP_MV         10
+
+#define PCM_DVFS_EFFICIENCY_MAX_ERROR_PCT 0.5f
+
+#define PCM_DVFS_BALANCED_MAX_ERROR_PCT      0.8f
+#define PCM_DVFS_BALANCED_MAX_ASIC_TEMP      64.0f
+#define PCM_DVFS_BALANCED_MAX_VR_TEMP        80.0f
+#define PCM_DVFS_BALANCED_PULLBACK_ASIC_TEMP 65.5f
+#define PCM_DVFS_BALANCED_PULLBACK_VR_TEMP   84.0f
+
+#define PCM_DVFS_PERFORMANCE_MAX_ERROR_PCT      1.0f
+#define PCM_DVFS_PERFORMANCE_MAX_ASIC_TEMP      68.0f
+#define PCM_DVFS_PERFORMANCE_MAX_VR_TEMP        90.0f
+#define PCM_DVFS_PERFORMANCE_MAX_POWER_W        31.0f
+#define PCM_DVFS_PERFORMANCE_PULLBACK_ASIC_TEMP 66.5f
+#define PCM_DVFS_PERFORMANCE_PULLBACK_VR_TEMP   87.0f
+#define PCM_DVFS_PERFORMANCE_PULLBACK_POWER_W   31.2f
+
 #define PCM_EMC2101_FAN_RPM_NUMERATOR 5400000U
 #define PCM_VR_TO_ASIC_TEMP_OFFSET_C  22.0f
 
@@ -68,6 +88,80 @@ uint16_t pcm_compute_effective_vcore(uint16_t target_voltage_mv,
                                      int16_t dvfs_voltage_offset_mv,
                                      uint16_t thermal_offset_mv,
                                      uint16_t vdroop_offset_mv);
+
+/**
+ * @brief Computes effective VCore floor considering any per-chip learned minimum.
+ */
+uint16_t pcm_dvfs_effective_vcore_floor(uint16_t learned_min_vcore_mv);
+
+/**
+ * @brief Computes effective DVFS frequency ceiling within profile bounds considering
+ *        any per-chip learned maximum frequency (<= 0 or NaN means unlocked).
+ */
+float pcm_dvfs_effective_freq_ceiling(float profile_min_freq_mhz,
+                                      float profile_max_freq_mhz,
+                                      float learned_max_freq_mhz);
+
+/**
+ * @brief Executes one 60 s evaluation step for DVFS Efficiency profile (profile 1)
+ *        with per-chip learned minimum VCore floor locking.
+ *
+ * @return Resulting base target VCore in mV.
+ */
+uint16_t pcm_dvfs_step_efficiency(uint16_t target_voltage_mv,
+                                  int16_t * dvfs_voltage_offset_mv,
+                                  uint16_t * learned_min_vcore_mv,
+                                  float error_percentage,
+                                  float power_w);
+
+/**
+ * @brief Executes one 60 s evaluation step for DVFS Balanced profile (profile 2),
+ *        enforcing fixed NVS voltage, per-chip learned max frequency ceiling, and
+ *        preventive thermal pullback before soft-throttling.
+ *
+ * @return Resulting base target frequency in MHz.
+ */
+float pcm_dvfs_step_balanced(float target_frequency_mhz,
+                             float * dvfs_freq_offset_mhz,
+                             int16_t * dvfs_voltage_offset_mv,
+                             float * learned_max_freq_mhz,
+                             float error_percentage,
+                             float chip_temp_c,
+                             float vr_temp_c,
+                             float power_w);
+
+/**
+ * @brief Executes one 60 s evaluation step for DVFS Performance profile (profile 3)
+ *        with 2D silicon learning (VCore floor + frequency ceiling) and preventive
+ *        thermal/power pullback.
+ *
+ * @return Resulting base target frequency in MHz.
+ */
+float pcm_dvfs_step_performance(float target_frequency_mhz,
+                                uint16_t target_voltage_mv,
+                                float * dvfs_freq_offset_mhz,
+                                int16_t * dvfs_voltage_offset_mv,
+                                float * learned_max_freq_mhz,
+                                uint16_t * learned_min_vcore_mv,
+                                float error_percentage,
+                                float chip_temp_c,
+                                float vr_temp_c,
+                                float power_w);
+
+/**
+ * @brief Updates DVFS learned bounds and RAM offsets when the ASIC Watchdog triggers
+ *        Level 1 or Level 2 recovery, preventing DVFS from climbing back into an
+ *        unstable operating point.
+ */
+void pcm_dvfs_apply_watchdog_event(uint16_t profile,
+                                   uint8_t consecutive_failures,
+                                   float target_frequency_mhz,
+                                   uint16_t target_voltage_mv,
+                                   float * dvfs_freq_offset_mhz,
+                                   int16_t * dvfs_voltage_offset_mv,
+                                   float * watchdog_freq_offset_mhz,
+                                   float * learned_max_freq_mhz,
+                                   uint16_t * learned_min_vcore_mv);
 
 /**
  * @brief Computes the next slow-loop Vdroop compensation offset in mV.

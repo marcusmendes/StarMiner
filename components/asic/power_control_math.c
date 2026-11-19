@@ -68,6 +68,259 @@ float pcm_compute_effective_freq(uint16_t profile,
     return fmaxf(PCM_FREQ_MIN_MHZ, base_target_freq - total_offset);
 }
 
+static void lock_learned_max_freq(float * learned_max_freq_mhz, float candidate_mhz)
+{
+    if (learned_max_freq_mhz == NULL) {
+        return;
+    }
+    if (isnan(*learned_max_freq_mhz) || *learned_max_freq_mhz <= 0.0f || candidate_mhz < *learned_max_freq_mhz) {
+        *learned_max_freq_mhz = candidate_mhz;
+    }
+}
+
+static void lock_learned_min_vcore(uint16_t * learned_min_vcore_mv, uint16_t candidate_mv)
+{
+    if (learned_min_vcore_mv == NULL) {
+        return;
+    }
+    if (candidate_mv > *learned_min_vcore_mv) {
+        *learned_min_vcore_mv = candidate_mv;
+    }
+}
+
+static void step_watchdog_freq_offset(float cur_base_freq, float * wd_freq_off)
+{
+    if (wd_freq_off == NULL) {
+        return;
+    }
+    if (cur_base_freq > PCM_FREQ_MIN_MHZ) {
+        float max_offset = cur_base_freq - PCM_FREQ_MIN_MHZ;
+        *wd_freq_off = fminf(max_offset, *wd_freq_off + PCM_DVFS_FREQ_STEP_MHZ);
+    }
+}
+
+uint16_t pcm_dvfs_effective_vcore_floor(uint16_t learned_min_vcore_mv)
+{
+    if (learned_min_vcore_mv > PCM_VCORE_MIN_MV) {
+        return pcm_clamp_vcore_mv((int32_t) learned_min_vcore_mv);
+    }
+    return PCM_VCORE_MIN_MV;
+}
+
+float pcm_dvfs_effective_freq_ceiling(float profile_min_freq_mhz,
+                                      float profile_max_freq_mhz,
+                                      float learned_max_freq_mhz)
+{
+    if (isnan(learned_max_freq_mhz) || learned_max_freq_mhz <= 0.0f) {
+        return profile_max_freq_mhz;
+    }
+    return fmaxf(profile_min_freq_mhz, fminf(profile_max_freq_mhz, learned_max_freq_mhz));
+}
+
+uint16_t pcm_dvfs_step_efficiency(uint16_t target_voltage_mv,
+                                  int16_t * dvfs_voltage_offset_mv,
+                                  uint16_t * learned_min_vcore_mv,
+                                  float error_percentage,
+                                  float power_w)
+{
+    int16_t volt_offset = (dvfs_voltage_offset_mv != NULL) ? *dvfs_voltage_offset_mv : 0;
+    uint16_t learned_floor = (learned_min_vcore_mv != NULL) ? *learned_min_vcore_mv : 0;
+    uint16_t cur_mv = pcm_compute_effective_vcore(target_voltage_mv, volt_offset, 0, 0);
+    uint16_t next_mv = cur_mv;
+    float err_pct = isnan(error_percentage) ? 0.0f : error_percentage;
+
+    if (err_pct <= PCM_DVFS_EFFICIENCY_MAX_ERROR_PCT) {
+        uint16_t effective_floor = pcm_dvfs_effective_vcore_floor(learned_floor);
+        if (cur_mv > effective_floor) {
+            uint16_t stepped = (cur_mv >= PCM_DVFS_VCORE_STEP_DOWN_MV)
+                                   ? (uint16_t) (cur_mv - PCM_DVFS_VCORE_STEP_DOWN_MV)
+                                   : 0;
+            next_mv = (stepped < effective_floor) ? effective_floor : stepped;
+        }
+    } else if (!isnan(power_w) && power_w <= PCM_MAX_POWER_W) {
+        next_mv = pcm_clamp_vcore_mv((int32_t) cur_mv + PCM_DVFS_VCORE_STEP_UP_MV);
+        lock_learned_min_vcore(learned_min_vcore_mv, next_mv);
+    }
+
+    if (dvfs_voltage_offset_mv != NULL && next_mv != cur_mv) {
+        *dvfs_voltage_offset_mv = (int16_t) ((int32_t) next_mv - (int32_t) target_voltage_mv);
+    }
+    return next_mv;
+}
+
+float pcm_dvfs_step_balanced(float target_frequency_mhz,
+                             float * dvfs_freq_offset_mhz,
+                             int16_t * dvfs_voltage_offset_mv,
+                             float * learned_max_freq_mhz,
+                             float error_percentage,
+                             float chip_temp_c,
+                             float vr_temp_c,
+                             float power_w)
+{
+    if (dvfs_voltage_offset_mv != NULL) {
+        *dvfs_voltage_offset_mv = 0;
+    }
+
+    float freq_offset = (dvfs_freq_offset_mhz != NULL) ? *dvfs_freq_offset_mhz : 0.0f;
+    float learned_ceiling = (learned_max_freq_mhz != NULL) ? *learned_max_freq_mhz : 0.0f;
+    float cur_freq = pcm_compute_dvfs_base_freq(PCM_DVFS_PROFILE_BALANCED, target_frequency_mhz, freq_offset);
+    float clamped_target_freq = pcm_compute_dvfs_base_freq(PCM_DVFS_PROFILE_BALANCED, target_frequency_mhz, 0.0f);
+    float next_freq = cur_freq;
+
+    float err_pct = isnan(error_percentage) ? 0.0f : error_percentage;
+    bool chip_valid = !isnan(chip_temp_c) && chip_temp_c > 0.0f;
+    bool vr_valid = !isnan(vr_temp_c) && vr_temp_c >= 0.0f;
+    bool power_valid = !isnan(power_w);
+
+    if (err_pct > PCM_DVFS_BALANCED_MAX_ERROR_PCT) {
+        next_freq = fmaxf(PCM_DVFS_BALANCED_MIN_FREQ_MHZ, cur_freq - PCM_DVFS_FREQ_STEP_MHZ);
+        lock_learned_max_freq(learned_max_freq_mhz, next_freq);
+    } else if ((chip_valid && chip_temp_c >= PCM_DVFS_BALANCED_PULLBACK_ASIC_TEMP) ||
+               (vr_valid && vr_temp_c >= PCM_DVFS_BALANCED_PULLBACK_VR_TEMP)) {
+        if (cur_freq > (clamped_target_freq + 0.001f)) {
+            next_freq = fmaxf(clamped_target_freq, cur_freq - PCM_DVFS_FREQ_STEP_MHZ);
+        }
+    } else if ((chip_valid && chip_temp_c < PCM_DVFS_BALANCED_MAX_ASIC_TEMP) &&
+               (vr_valid && vr_temp_c < PCM_DVFS_BALANCED_MAX_VR_TEMP) &&
+               (power_valid && power_w <= PCM_MAX_POWER_W)) {
+        float ceiling = pcm_dvfs_effective_freq_ceiling(PCM_DVFS_BALANCED_MIN_FREQ_MHZ,
+                                                        PCM_DVFS_BALANCED_MAX_FREQ_MHZ,
+                                                        learned_ceiling);
+        if (cur_freq < ceiling) {
+            next_freq = fminf(ceiling, cur_freq + PCM_DVFS_FREQ_STEP_MHZ);
+        }
+    }
+
+    if (dvfs_freq_offset_mhz != NULL && fabsf(next_freq - cur_freq) > 0.001f) {
+        *dvfs_freq_offset_mhz = next_freq - target_frequency_mhz;
+    }
+    return next_freq;
+}
+
+float pcm_dvfs_step_performance(float target_frequency_mhz,
+                                uint16_t target_voltage_mv,
+                                float * dvfs_freq_offset_mhz,
+                                int16_t * dvfs_voltage_offset_mv,
+                                float * learned_max_freq_mhz,
+                                uint16_t * learned_min_vcore_mv,
+                                float error_percentage,
+                                float chip_temp_c,
+                                float vr_temp_c,
+                                float power_w)
+{
+    float freq_offset = (dvfs_freq_offset_mhz != NULL) ? *dvfs_freq_offset_mhz : 0.0f;
+    int16_t volt_offset = (dvfs_voltage_offset_mv != NULL) ? *dvfs_voltage_offset_mv : 0;
+    float learned_ceiling = (learned_max_freq_mhz != NULL) ? *learned_max_freq_mhz : 0.0f;
+
+    float cur_freq = pcm_compute_dvfs_base_freq(PCM_DVFS_PROFILE_PERFORMANCE, target_frequency_mhz, freq_offset);
+    float clamped_target_freq = pcm_compute_dvfs_base_freq(PCM_DVFS_PROFILE_PERFORMANCE, target_frequency_mhz, 0.0f);
+    uint16_t cur_mv = pcm_compute_effective_vcore(target_voltage_mv, volt_offset, 0, 0);
+
+    float next_freq = cur_freq;
+    uint16_t next_mv = cur_mv;
+
+    float err_pct = isnan(error_percentage) ? 0.0f : error_percentage;
+    bool chip_valid = !isnan(chip_temp_c) && chip_temp_c > 0.0f;
+    bool vr_valid = !isnan(vr_temp_c) && vr_temp_c >= 0.0f;
+    bool power_valid = !isnan(power_w);
+    bool power_ok = power_valid && power_w < PCM_DVFS_PERFORMANCE_MAX_POWER_W;
+
+    if (err_pct > PCM_DVFS_PERFORMANCE_MAX_ERROR_PCT) {
+        if (cur_mv < PCM_VCORE_MAX_MV && power_ok) {
+            next_mv = pcm_clamp_vcore_mv((int32_t) cur_mv + PCM_DVFS_VCORE_STEP_UP_MV);
+            lock_learned_min_vcore(learned_min_vcore_mv, next_mv);
+        } else {
+            next_freq = fmaxf(PCM_DVFS_PERFORMANCE_MIN_FREQ_MHZ, cur_freq - PCM_DVFS_FREQ_STEP_MHZ);
+            lock_learned_max_freq(learned_max_freq_mhz, next_freq);
+        }
+    } else if ((chip_valid && chip_temp_c >= PCM_DVFS_PERFORMANCE_PULLBACK_ASIC_TEMP) ||
+               (vr_valid && vr_temp_c >= PCM_DVFS_PERFORMANCE_PULLBACK_VR_TEMP) ||
+               (power_valid && power_w >= PCM_DVFS_PERFORMANCE_PULLBACK_POWER_W)) {
+        if (cur_freq > (clamped_target_freq + 0.001f)) {
+            next_freq = fmaxf(clamped_target_freq, cur_freq - PCM_DVFS_FREQ_STEP_MHZ);
+        }
+    } else if ((chip_valid && chip_temp_c < PCM_DVFS_PERFORMANCE_MAX_ASIC_TEMP) &&
+               (vr_valid && vr_temp_c < PCM_DVFS_PERFORMANCE_MAX_VR_TEMP) &&
+               power_ok) {
+        float ceiling = pcm_dvfs_effective_freq_ceiling(PCM_DVFS_PERFORMANCE_MIN_FREQ_MHZ,
+                                                        PCM_DVFS_PERFORMANCE_MAX_FREQ_MHZ,
+                                                        learned_ceiling);
+        if (cur_freq < ceiling) {
+            next_freq = fminf(ceiling, cur_freq + PCM_DVFS_FREQ_STEP_MHZ);
+        }
+    }
+
+    if (dvfs_voltage_offset_mv != NULL && next_mv != cur_mv) {
+        *dvfs_voltage_offset_mv = (int16_t) ((int32_t) next_mv - (int32_t) target_voltage_mv);
+    }
+    if (dvfs_freq_offset_mhz != NULL && fabsf(next_freq - cur_freq) > 0.001f) {
+        *dvfs_freq_offset_mhz = next_freq - target_frequency_mhz;
+    }
+    return next_freq;
+}
+
+void pcm_dvfs_apply_watchdog_event(uint16_t profile,
+                                   uint8_t consecutive_failures,
+                                   float target_frequency_mhz,
+                                   uint16_t target_voltage_mv,
+                                   float * dvfs_freq_offset_mhz,
+                                   int16_t * dvfs_voltage_offset_mv,
+                                   float * watchdog_freq_offset_mhz,
+                                   float * learned_max_freq_mhz,
+                                   uint16_t * learned_min_vcore_mv)
+{
+    if (consecutive_failures == 0) {
+        return;
+    }
+
+    float dvfs_freq_off = (dvfs_freq_offset_mhz != NULL) ? *dvfs_freq_offset_mhz : 0.0f;
+    int16_t dvfs_volt_off = (dvfs_voltage_offset_mv != NULL) ? *dvfs_voltage_offset_mv : 0;
+    float wd_freq_off = (watchdog_freq_offset_mhz != NULL) ? *watchdog_freq_offset_mhz : 0.0f;
+    float cur_base_freq = pcm_compute_dvfs_base_freq(profile, target_frequency_mhz, dvfs_freq_off);
+
+    if (consecutive_failures == 1) {
+        if (profile == PCM_DVFS_PROFILE_BALANCED || profile == PCM_DVFS_PROFILE_PERFORMANCE) {
+            lock_learned_max_freq(learned_max_freq_mhz, cur_base_freq);
+        }
+        return;
+    }
+
+    if (profile == PCM_DVFS_PROFILE_BALANCED || profile == PCM_DVFS_PROFILE_PERFORMANCE) {
+        float min_freq = PCM_FREQ_MIN_MHZ;
+        float max_freq = PCM_DVFS_PERFORMANCE_MAX_FREQ_MHZ;
+        pcm_get_dvfs_freq_bounds(profile, &min_freq, &max_freq);
+
+        if (cur_base_freq > (min_freq + 0.001f)) {
+            float next_freq = fmaxf(min_freq, cur_base_freq - PCM_DVFS_FREQ_STEP_MHZ);
+            dvfs_freq_off = next_freq - target_frequency_mhz;
+            lock_learned_max_freq(learned_max_freq_mhz, next_freq);
+        } else {
+            lock_learned_max_freq(learned_max_freq_mhz, min_freq);
+            step_watchdog_freq_offset(cur_base_freq, &wd_freq_off);
+        }
+    } else if (profile == PCM_DVFS_PROFILE_EFFICIENCY) {
+        step_watchdog_freq_offset(cur_base_freq, &wd_freq_off);
+        uint16_t cur_mv = pcm_compute_effective_vcore(target_voltage_mv, dvfs_volt_off, 0, 0);
+        uint16_t cur_learned_mv = (learned_min_vcore_mv != NULL) ? *learned_min_vcore_mv : 0;
+        uint16_t base_mv = (cur_learned_mv > cur_mv) ? cur_learned_mv : cur_mv;
+        uint16_t next_mv = pcm_clamp_vcore_mv((int32_t) base_mv + PCM_DVFS_VCORE_STEP_UP_MV);
+        lock_learned_min_vcore(learned_min_vcore_mv, next_mv);
+        dvfs_volt_off = (int16_t) ((int32_t) next_mv - (int32_t) target_voltage_mv);
+    } else {
+        step_watchdog_freq_offset(cur_base_freq, &wd_freq_off);
+    }
+
+    if (dvfs_freq_offset_mhz != NULL) {
+        *dvfs_freq_offset_mhz = dvfs_freq_off;
+    }
+    if (dvfs_voltage_offset_mv != NULL) {
+        *dvfs_voltage_offset_mv = dvfs_volt_off;
+    }
+    if (watchdog_freq_offset_mhz != NULL) {
+        *watchdog_freq_offset_mhz = wd_freq_off;
+    }
+}
+
 uint16_t pcm_compute_effective_vcore(uint16_t target_voltage_mv,
                                      int16_t dvfs_voltage_offset_mv,
                                      uint16_t thermal_offset_mv,

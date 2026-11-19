@@ -58,26 +58,6 @@
 
 // DVFS profiles and Auto-Tuner envelopes
 #define DVFS_STEP_INTERVAL_US          (60LL * 1000000LL)
-#define DVFS_FREQ_STEP_MHZ             12.5f
-#define DVFS_VCORE_STEP_DOWN_MV        5
-#define DVFS_VCORE_STEP_UP_MV          10
-
-#define DVFS_EFFICIENCY_MIN_FREQ_MHZ   PCM_DVFS_EFFICIENCY_MIN_FREQ_MHZ
-#define DVFS_EFFICIENCY_MAX_FREQ_MHZ   PCM_DVFS_EFFICIENCY_MAX_FREQ_MHZ
-#define DVFS_EFFICIENCY_MAX_ERROR_PCT  0.5f
-
-#define DVFS_BALANCED_MIN_FREQ_MHZ     PCM_DVFS_BALANCED_MIN_FREQ_MHZ
-#define DVFS_BALANCED_MAX_FREQ_MHZ     PCM_DVFS_BALANCED_MAX_FREQ_MHZ
-#define DVFS_BALANCED_MAX_ERROR_PCT    0.8f
-#define DVFS_BALANCED_MAX_ASIC_TEMP    64.0f
-#define DVFS_BALANCED_MAX_VR_TEMP      80.0f
-
-#define DVFS_PERFORMANCE_MIN_FREQ_MHZ  PCM_DVFS_PERFORMANCE_MIN_FREQ_MHZ
-#define DVFS_PERFORMANCE_MAX_FREQ_MHZ  PCM_DVFS_PERFORMANCE_MAX_FREQ_MHZ
-#define DVFS_PERFORMANCE_MAX_ERROR_PCT 1.0f
-#define DVFS_PERFORMANCE_MAX_ASIC_TEMP 68.0f
-#define DVFS_PERFORMANCE_MAX_VR_TEMP   90.0f
-#define DVFS_PERFORMANCE_MAX_POWER_W   31.0f
 
 typedef enum {
     DVFS_PROFILE_MANUAL = PCM_DVFS_PROFILE_MANUAL,
@@ -96,6 +76,18 @@ static bool is_valid_temp(float temp)
 static bool is_vr_temp_valid(const GlobalState * GLOBAL_STATE, float vr)
 {
     return !isnan(vr) && (!GLOBAL_STATE->DEVICE_CONFIG.TPS546 || vr > 0.0f);
+}
+
+static float get_max_valid_chip_temp(float chip1, float chip2)
+{
+    float max_temp = 0.0f;
+    if (is_valid_temp(chip1)) {
+        max_temp = chip1;
+    }
+    if (is_valid_temp(chip2) && chip2 > max_temp) {
+        max_temp = chip2;
+    }
+    return max_temp;
 }
 
 static bool are_asic_temps_below(float chip1, float chip2, float limit)
@@ -151,6 +143,8 @@ static void reset_dvfs_state(PowerManagementModule * power_management, int64_t n
 {
     power_management->dvfs_freq_offset_mhz = 0.0f;
     power_management->dvfs_voltage_offset_mv = 0;
+    power_management->learned_max_freq_mhz = 0.0f;
+    power_management->learned_min_vcore_mv = 0;
     power_management->last_dvfs_step_us = now_us;
 }
 
@@ -277,19 +271,34 @@ static void handle_asic_watchdog(GlobalState * GLOBAL_STATE)
         return;
     }
 
+    pcm_dvfs_apply_watchdog_event(power_management->dvfs_profile,
+                                  power_management->watchdog_consecutive_failures,
+                                  power_management->target_frequency,
+                                  power_management->target_voltage,
+                                  &power_management->dvfs_freq_offset_mhz,
+                                  &power_management->dvfs_voltage_offset_mv,
+                                  &power_management->watchdog_freq_offset_mhz,
+                                  &power_management->learned_max_freq_mhz,
+                                  &power_management->learned_min_vcore_mv);
+
+    float effective_freq = get_effective_frequency_mhz(power_management);
+    uint16_t effective_vcore = get_effective_voltage_mv(power_management);
+
     if (power_management->watchdog_consecutive_failures >= 2) {
-        float base_freq = get_dvfs_base_target_freq(power_management);
-        if (base_freq > WATCHDOG_MIN_FREQ_MHZ) {
-            float max_offset = base_freq - WATCHDOG_MIN_FREQ_MHZ;
-            power_management->watchdog_freq_offset_mhz = fminf(
-                max_offset,
-                power_management->watchdog_freq_offset_mhz + WATCHDOG_FREQ_STEP_DOWN_MHZ);
-        }
-        float effective_freq = get_effective_frequency_mhz(power_management);
-        ESP_LOGW(TAG, "ASIC Watchdog Level 2 (failure %u/3 in <10 min): RAM step-down to %.1f MHz (NVS %.1f MHz unchanged)",
-                 power_management->watchdog_consecutive_failures, effective_freq, power_management->target_frequency);
+        ESP_LOGW(TAG,
+                 "ASIC Watchdog Level 2 (failure %u/3 in <10 min): RAM step-down to %.1f MHz / %u mV (NVS %.1f MHz unchanged, learned max: %.1f MHz, learned min VCore: %u mV)",
+                 power_management->watchdog_consecutive_failures,
+                 effective_freq,
+                 effective_vcore,
+                 power_management->target_frequency,
+                 power_management->learned_max_freq_mhz,
+                 power_management->learned_min_vcore_mv);
     } else {
-        ESP_LOGW(TAG, "ASIC Watchdog Level 1 (failure 1/3): soft re-init of ASIC");
+        ESP_LOGW(TAG,
+                 "ASIC Watchdog Level 1 (failure 1/3): soft re-init of ASIC at %.1f MHz / %u mV (learned max: %.1f MHz)",
+                 effective_freq,
+                 effective_vcore,
+                 power_management->learned_max_freq_mhz);
     }
 
     mining_stop(GLOBAL_STATE);
@@ -391,28 +400,6 @@ static void apply_effective_power_and_freq(GlobalState * GLOBAL_STATE)
     }
 }
 
-static void step_dvfs_frequency(PowerManagementModule * power_management, float delta_mhz, float min_freq, float max_freq)
-{
-    float cur_freq = get_dvfs_base_target_freq(power_management);
-    float next_freq = fminf(max_freq, fmaxf(min_freq, cur_freq + delta_mhz));
-    if (fabsf(next_freq - cur_freq) > 0.001f) {
-        power_management->dvfs_freq_offset_mhz = next_freq - power_management->target_frequency;
-        ESP_LOGI(TAG, "DVFS profile %u frequency step -> %.1f MHz (offset: %+.1f MHz)",
-                 power_management->dvfs_profile, next_freq, power_management->dvfs_freq_offset_mhz);
-    }
-}
-
-static void step_dvfs_voltage(PowerManagementModule * power_management, int16_t delta_mv)
-{
-    uint16_t cur_mv = get_dvfs_base_target_voltage_mv(power_management);
-    uint16_t next_mv = pcm_clamp_vcore_mv((int32_t) cur_mv + (int32_t) delta_mv);
-    if (next_mv != cur_mv) {
-        power_management->dvfs_voltage_offset_mv = (int16_t) ((int32_t) next_mv - (int32_t) power_management->target_voltage);
-        ESP_LOGI(TAG, "DVFS profile %u VCore step -> %u mV (offset: %+d mV)",
-                 power_management->dvfs_profile, next_mv, power_management->dvfs_voltage_offset_mv);
-    }
-}
-
 static void handle_dvfs_autotuner(GlobalState * GLOBAL_STATE)
 {
     PowerManagementModule * power_management = &GLOBAL_STATE->POWER_MANAGEMENT_MODULE;
@@ -420,9 +407,7 @@ static void handle_dvfs_autotuner(GlobalState * GLOBAL_STATE)
     int64_t now_us = esp_timer_get_time();
 
     if (power_management->dvfs_profile == DVFS_PROFILE_MANUAL || GLOBAL_STATE->SELF_TEST_MODULE.is_active) {
-        power_management->dvfs_freq_offset_mhz = 0.0f;
-        power_management->dvfs_voltage_offset_mv = 0;
-        power_management->last_dvfs_step_us = now_us;
+        reset_dvfs_state(power_management, now_us);
         return;
     }
 
@@ -442,57 +427,70 @@ static void handle_dvfs_autotuner(GlobalState * GLOBAL_STATE)
     power_management->last_dvfs_step_us = now_us;
 
     float err_pct = isnan(sys_module->error_percentage) ? 0.0f : sys_module->error_percentage;
-    float chip1 = power_management->chip_temp_avg;
-    float chip2 = power_management->chip_temp2_avg;
-    float vr = power_management->vr_temp;
+    float chip_temp = get_max_valid_chip_temp(power_management->chip_temp_avg, power_management->chip_temp2_avg);
+    float vr_for_dvfs = is_vr_temp_valid(GLOBAL_STATE, power_management->vr_temp)
+                            ? fmaxf(0.0f, power_management->vr_temp)
+                            : NAN;
     float power = power_management->power;
-    bool vr_valid = is_vr_temp_valid(GLOBAL_STATE, vr);
-    bool power_valid = !isnan(power);
+
+    float prev_freq = get_dvfs_base_target_freq(power_management);
+    uint16_t prev_mv = get_dvfs_base_target_voltage_mv(power_management);
+    float prev_learned_freq = power_management->learned_max_freq_mhz;
+    uint16_t prev_learned_mv = power_management->learned_min_vcore_mv;
 
     switch (power_management->dvfs_profile) {
-        case DVFS_PROFILE_EFFICIENCY: {
-            if (err_pct <= DVFS_EFFICIENCY_MAX_ERROR_PCT) {
-                step_dvfs_voltage(power_management, -DVFS_VCORE_STEP_DOWN_MV);
-            } else if (power_valid && power <= MAX_POWER_W) {
-                step_dvfs_voltage(power_management, DVFS_VCORE_STEP_UP_MV);
-            }
+        case DVFS_PROFILE_EFFICIENCY:
+            pcm_dvfs_step_efficiency(power_management->target_voltage,
+                                     &power_management->dvfs_voltage_offset_mv,
+                                     &power_management->learned_min_vcore_mv,
+                                     err_pct,
+                                     power);
             break;
-        }
-        case DVFS_PROFILE_BALANCED: {
-            bool asic_cool = are_asic_temps_below(chip1, chip2, DVFS_BALANCED_MAX_ASIC_TEMP);
-            bool vr_cool = vr_valid && vr < DVFS_BALANCED_MAX_VR_TEMP;
-            bool power_ok = power_valid && power <= MAX_POWER_W;
-
-            if (err_pct > DVFS_BALANCED_MAX_ERROR_PCT) {
-                step_dvfs_frequency(power_management, -DVFS_FREQ_STEP_MHZ,
-                                    DVFS_BALANCED_MIN_FREQ_MHZ, DVFS_BALANCED_MAX_FREQ_MHZ);
-            } else if (asic_cool && vr_cool && power_ok) {
-                step_dvfs_frequency(power_management, DVFS_FREQ_STEP_MHZ,
-                                    DVFS_BALANCED_MIN_FREQ_MHZ, DVFS_BALANCED_MAX_FREQ_MHZ);
-            }
+        case DVFS_PROFILE_BALANCED:
+            pcm_dvfs_step_balanced(power_management->target_frequency,
+                                   &power_management->dvfs_freq_offset_mhz,
+                                   &power_management->dvfs_voltage_offset_mv,
+                                   &power_management->learned_max_freq_mhz,
+                                   err_pct,
+                                   chip_temp,
+                                   vr_for_dvfs,
+                                   power);
             break;
-        }
-        case DVFS_PROFILE_PERFORMANCE: {
-            bool asic_cool = are_asic_temps_below(chip1, chip2, DVFS_PERFORMANCE_MAX_ASIC_TEMP);
-            bool vr_cool = vr_valid && vr < DVFS_PERFORMANCE_MAX_VR_TEMP;
-            bool power_ok = power_valid && power < DVFS_PERFORMANCE_MAX_POWER_W;
-            uint16_t cur_mv = get_dvfs_base_target_voltage_mv(power_management);
-
-            if (err_pct > DVFS_PERFORMANCE_MAX_ERROR_PCT) {
-                if (cur_mv < VCORE_MAX_MV && power_ok) {
-                    step_dvfs_voltage(power_management, DVFS_VCORE_STEP_UP_MV);
-                } else {
-                    step_dvfs_frequency(power_management, -DVFS_FREQ_STEP_MHZ,
-                                        DVFS_PERFORMANCE_MIN_FREQ_MHZ, DVFS_PERFORMANCE_MAX_FREQ_MHZ);
-                }
-            } else if (asic_cool && vr_cool && power_ok) {
-                step_dvfs_frequency(power_management, DVFS_FREQ_STEP_MHZ,
-                                    DVFS_PERFORMANCE_MIN_FREQ_MHZ, DVFS_PERFORMANCE_MAX_FREQ_MHZ);
-            }
+        case DVFS_PROFILE_PERFORMANCE:
+            pcm_dvfs_step_performance(power_management->target_frequency,
+                                      power_management->target_voltage,
+                                      &power_management->dvfs_freq_offset_mhz,
+                                      &power_management->dvfs_voltage_offset_mv,
+                                      &power_management->learned_max_freq_mhz,
+                                      &power_management->learned_min_vcore_mv,
+                                      err_pct,
+                                      chip_temp,
+                                      vr_for_dvfs,
+                                      power);
             break;
-        }
         default:
             break;
+    }
+
+    float next_freq = get_dvfs_base_target_freq(power_management);
+    uint16_t next_mv = get_dvfs_base_target_voltage_mv(power_management);
+
+    if (next_mv != prev_mv) {
+        ESP_LOGI(TAG, "DVFS profile %u VCore step -> %u mV (offset: %+d mV, learned floor: %u mV)",
+                 power_management->dvfs_profile, next_mv,
+                 power_management->dvfs_voltage_offset_mv, power_management->learned_min_vcore_mv);
+    } else if (power_management->learned_min_vcore_mv != prev_learned_mv) {
+        ESP_LOGI(TAG, "DVFS profile %u locked learned VCore floor -> %u mV",
+                 power_management->dvfs_profile, power_management->learned_min_vcore_mv);
+    }
+
+    if (fabsf(next_freq - prev_freq) > 0.001f) {
+        ESP_LOGI(TAG, "DVFS profile %u frequency step -> %.1f MHz (offset: %+.1f MHz, learned ceiling: %.1f MHz)",
+                 power_management->dvfs_profile, next_freq,
+                 power_management->dvfs_freq_offset_mhz, power_management->learned_max_freq_mhz);
+    } else if (fabsf(power_management->learned_max_freq_mhz - prev_learned_freq) > 0.001f) {
+        ESP_LOGI(TAG, "DVFS profile %u locked learned max frequency -> %.1f MHz",
+                 power_management->dvfs_profile, power_management->learned_max_freq_mhz);
     }
 }
 

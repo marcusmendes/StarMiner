@@ -16,7 +16,7 @@ Subcommands:
   backup-flash <serial_port>    Dump nvs (0x9000, 24 KB), otadata (0xf10000, 8 KB), and full 16 MB flash
                                 via esptool.py, verify exact byte sizes, and create/verify SHA256SUMS.
   verify-post-flash <device_ip> Audit GET /api/system/info for boardVersion starting with "601a" (e.g. 601a-2, 601a-4),
-                                freeHeapInternal>=110000, absence of power_fault, and all 7 Phase 4 telemetry fields.
+                                freeHeapInternal>=110000, absence of power_fault, and all 10 Phase 4/5 telemetry fields.
   --help, -h, help              Show this help message and exit.
 
 Environment Variables:
@@ -245,6 +245,9 @@ phase4_fields = [
     "dvfsProfile",
     "cmlErrorCount",
     "watchdogResets",
+    "learnedMaxFreq",
+    "learnedMinVcore",
+    "lastWatchdogReason",
 ]
 
 checks = [

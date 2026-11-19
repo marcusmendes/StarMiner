@@ -25,6 +25,8 @@ extern "C" {
 #define PCM_DVFS_PERFORMANCE_MIN_FREQ_MHZ 550.0f
 #define PCM_DVFS_PERFORMANCE_MAX_FREQ_MHZ 675.0f
 
+#define PCM_EMC2101_FAN_RPM_NUMERATOR 5400000U
+
 typedef enum {
     PCM_DVFS_PROFILE_MANUAL = 0,
     PCM_DVFS_PROFILE_EFFICIENCY = 1,
@@ -73,6 +75,13 @@ uint16_t pcm_step_vdroop_offset_mv(uint16_t current_offset_mv,
                                    uint16_t base_voltage_mv,
                                    float measured_voltage_mv,
                                    float power_w);
+
+/**
+ * @brief Converts a raw 16-bit EMC2101 tachometer reading to fan RPM.
+ *
+ * Returns 0 for invalid/stalled readings (0x0000, 0xFFFF, or saturated RPM == 82).
+ */
+uint16_t pcm_emc2101_tach_to_rpm(uint16_t reading);
 
 #ifdef __cplusplus
 }

@@ -173,6 +173,13 @@ static void mining_stop(GlobalState * GLOBAL_STATE)
 {
     ESP_LOGI(TAG, "Stopping mining");
 
+    // Mark uninitialized immediately so Core 1 tasks stop issuing UART1 commands
+    // before frequency ramp-down, voltage cut, or reset assertion
+    GLOBAL_STATE->ASIC_initalized = false;
+
+    // Give in-flight UART1 operations (create_jobs_task / hashrate_monitor_task) time to drain
+    vTaskDelay(pdMS_TO_TICKS(200));
+
     // Wind frequency down to 50 MHz before cutting power. This also updates
     // the transition tracker so the ramp starts from 50 MHz on next start,
     // rather than the stale pre-reset frequency.
@@ -188,10 +195,7 @@ static void mining_stop(GlobalState * GLOBAL_STATE)
     reset_vdroop_state(&GLOBAL_STATE->POWER_MANAGEMENT_MODULE);
     asic_hold_reset_low();
 
-    // Mark uninitialized immediately so tasks stop issuing UART commands
-    GLOBAL_STATE->ASIC_initalized = false;
-
-    // Give tasks time to complete any in-progress UART operation
+    // Give tasks time to settle after ASIC shutdown
     vTaskDelay(500 / portTICK_PERIOD_MS);
 
     // Flush any stale data from the UART buffers

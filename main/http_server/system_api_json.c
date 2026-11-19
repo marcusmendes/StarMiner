@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <pthread.h>
 #include "esp_wifi.h"
 #include "esp_ota_ops.h"
 #include "esp_system.h"
@@ -240,6 +241,7 @@ static void system_api_add_hashrate_monitor(cJSON *root, GlobalState *g) {
     int asic_count = g->DEVICE_CONFIG.family.asic_count;
     int hash_domains = g->DEVICE_CONFIG.family.asic.hash_domains;
 
+    pthread_mutex_lock(&g->HASHRATE_MONITOR_MODULE.lock);
     for (int i = 0; i < asic_count; i++) {
         cJSON *asic = cJSON_CreateObject();
         cJSON_AddItemToArray(asics, asic);
@@ -253,6 +255,7 @@ static void system_api_add_hashrate_monitor(cJSON *root, GlobalState *g) {
             cJSON_AddItemToArray(domains, cJSON_CreateNumber(g->HASHRATE_MONITOR_MODULE.domain_measurements[i][j].hashrate));
         }
     }
+    pthread_mutex_unlock(&g->HASHRATE_MONITOR_MODULE.lock);
 }
 
 static void system_api_add_rejected_reasons(cJSON *root, GlobalState *g) {

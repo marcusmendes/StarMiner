@@ -3,6 +3,7 @@
 #include "system.h"
 #include "work_queue.h"
 #include "serial.h"
+#include <stdio.h>
 #include <string.h>
 #include "esp_log.h"
 #include "nvs_config.h"
@@ -43,31 +44,51 @@ void ASIC_result_task(void *pvParameters)
 
         uint8_t job_id = asic_result->job_id;
 
+        bm_job job_snapshot = {0};
+        char jobid_buf[128] = {0};
+        char extranonce2_buf[65] = {0};
+        bool valid = false;
+
         pthread_mutex_lock(&GLOBAL_STATE->valid_jobs_lock);
-        bool valid = (GLOBAL_STATE->valid_jobs[job_id] != 0);
-        bm_job *active_job = valid ? GLOBAL_STATE->ASIC_TASK_MODULE.active_jobs[job_id] : NULL;
+        if (job_id < 128 &&
+            GLOBAL_STATE->valid_jobs != NULL &&
+            GLOBAL_STATE->ASIC_TASK_MODULE.active_jobs != NULL &&
+            GLOBAL_STATE->valid_jobs[job_id] != 0 &&
+            GLOBAL_STATE->ASIC_TASK_MODULE.active_jobs[job_id] != NULL) {
+            bm_job *active_job = GLOBAL_STATE->ASIC_TASK_MODULE.active_jobs[job_id];
+            job_snapshot = *active_job;
+            if (active_job->jobid != NULL) {
+                snprintf(jobid_buf, sizeof(jobid_buf), "%s", active_job->jobid);
+            }
+            if (active_job->extranonce2 != NULL) {
+                snprintf(extranonce2_buf, sizeof(extranonce2_buf), "%s", active_job->extranonce2);
+            }
+            job_snapshot.jobid = jobid_buf;
+            job_snapshot.extranonce2 = extranonce2_buf;
+            valid = true;
+        }
         pthread_mutex_unlock(&GLOBAL_STATE->valid_jobs_lock);
 
-        if (!valid || active_job == NULL)
+        if (!valid)
         {
             ESP_LOGW(TAG, "Invalid job nonce found, 0x%02X", job_id);
             continue;
         }
         // check the nonce difficulty
-        double nonce_diff = test_nonce_value(active_job, asic_result->nonce, asic_result->rolled_version);
+        double nonce_diff = test_nonce_value(&job_snapshot, asic_result->nonce, asic_result->rolled_version);
 
         if (GLOBAL_STATE->SELF_TEST_MODULE.is_active) {
             self_test_record_nonce(GLOBAL_STATE, nonce_diff);
             continue;
         }
 
-        uint32_t version_bits = asic_result->rolled_version ^ active_job->version;
-        if (nonce_diff >= active_job->pool_diff)
+        uint32_t version_bits = asic_result->rolled_version ^ job_snapshot.version;
+        if (nonce_diff >= job_snapshot.pool_diff)
         {
             if (GLOBAL_STATE->stratum_protocol == STRATUM_PROTOCOL_V2) {
                 // SV2: submit with binary protocol
                 int ret;
-                uint32_t sv2_job_id = (uint32_t)strtoul(active_job->jobid, NULL, 10);
+                uint32_t sv2_job_id = (uint32_t)strtoul(job_snapshot.jobid, NULL, 10);
 
                 if (stratum_v2_is_extended_channel(GLOBAL_STATE)) {
                     sv2_conn_t *conn = GLOBAL_STATE->sv2_conn;
@@ -75,16 +96,16 @@ void ASIC_result_task(void *pvParameters)
                     // The pool prepends its extranonce_prefix separately.
                     uint8_t en2_len = conn->extranonce_size;
                     uint8_t extranonce_2[32];
-                    hex2bin(active_job->extranonce2, extranonce_2, en2_len);
+                    hex2bin(job_snapshot.extranonce2, extranonce_2, en2_len);
                     ret = stratum_v2_submit_share_extended(GLOBAL_STATE, sv2_job_id,
                                                            asic_result->nonce,
-                                                           active_job->ntime,
+                                                           job_snapshot.ntime,
                                                            asic_result->rolled_version,
                                                            extranonce_2, en2_len);
                 } else {
                     ret = stratum_v2_submit_share(GLOBAL_STATE, sv2_job_id,
                                                    asic_result->nonce,
-                                                   active_job->ntime,
+                                                   job_snapshot.ntime,
                                                    asic_result->rolled_version);
                 }
 
@@ -109,9 +130,9 @@ void ASIC_result_task(void *pvParameters)
                         transport,
                         uid,
                         user,
-                        active_job->jobid,
-                        active_job->extranonce2,
-                        active_job->ntime,
+                        job_snapshot.jobid,
+                        job_snapshot.extranonce2,
+                        job_snapshot.ntime,
                         asic_result->nonce,
                         version_bits,
                         &sent_time_us);
@@ -129,10 +150,10 @@ void ASIC_result_task(void *pvParameters)
         }
 
         //log the ASIC response
-        ESP_LOGI(TAG, "ID: %s, ASIC nr: %d, Core: %d/%d, ver: %08" PRIX32 " Nonce %08" PRIX32 " diff %.1f of %g.", active_job->jobid, asic_result->asic_nr, asic_result->core_id, asic_result->small_core_id, asic_result->rolled_version, asic_result->nonce, nonce_diff, active_job->pool_diff);
+        ESP_LOGI(TAG, "ID: %s, ASIC nr: %d, Core: %d/%d, ver: %08" PRIX32 " Nonce %08" PRIX32 " diff %.1f of %g.", job_snapshot.jobid, asic_result->asic_nr, asic_result->core_id, asic_result->small_core_id, asic_result->rolled_version, asic_result->nonce, nonce_diff, job_snapshot.pool_diff);
 
-        SYSTEM_notify_found_nonce(GLOBAL_STATE, nonce_diff, job_id);
+        SYSTEM_notify_found_nonce(GLOBAL_STATE, nonce_diff, job_snapshot.target);
 
-        scoreboard_add(&GLOBAL_STATE->SYSTEM_MODULE.scoreboard, nonce_diff, active_job->jobid, active_job->extranonce2, active_job->ntime, asic_result->nonce, version_bits);
+        scoreboard_add(&GLOBAL_STATE->SYSTEM_MODULE.scoreboard, nonce_diff, job_snapshot.jobid, job_snapshot.extranonce2, job_snapshot.ntime, asic_result->nonce, version_bits);
     }
 }

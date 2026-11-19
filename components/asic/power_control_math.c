@@ -105,3 +105,19 @@ uint16_t pcm_step_vdroop_offset_mv(uint16_t current_offset_mv,
 
     return offset_mv;
 }
+
+uint16_t pcm_emc2101_tach_to_rpm(uint16_t reading)
+{
+    if (reading == 0 || reading == 0xFFFF) {
+        return 0;
+    }
+
+    uint32_t rpm = PCM_EMC2101_FAN_RPM_NUMERATOR / (uint32_t) reading;
+    if (rpm == 82U) {
+        return 0;
+    }
+    if (rpm > UINT16_MAX) {
+        return UINT16_MAX;
+    }
+    return (uint16_t) rpm;
+}

@@ -4,6 +4,7 @@
 
 #include "i2c_bitaxe.h"
 #include "EMC2101.h"
+#include "power_control_math.h"
 
 static const char * TAG = "EMC2101";
 
@@ -135,13 +136,13 @@ uint16_t EMC2101_get_fan_speed(void)
 
     // ESP_LOGI(TAG, "Raw Fan Speed = %02X %02X", tach_msb, tach_lsb);
 
-    reading = tach_lsb | (tach_msb << 8);
-    RPM = 5400000 / reading;
-
-    // ESP_LOGI(TAG, "Fan Speed = %d RPM", RPM);
-    if (RPM == 82) {
+    reading = (uint16_t) tach_lsb | ((uint16_t) tach_msb << 8);
+    if (reading == 0 || reading == 0xFFFF) {
         return 0;
     }
+    RPM = pcm_emc2101_tach_to_rpm(reading);
+
+    // ESP_LOGI(TAG, "Fan Speed = %d RPM", RPM);
     return RPM;
 }
 

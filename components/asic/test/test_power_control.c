@@ -106,3 +106,23 @@ TEST_CASE("Vdroop slow-loop steps by 5 mV up to 20 mV and blocks above 32 W", "[
     TEST_ASSERT_EQUAL_UINT16(0, pcm_step_vdroop_offset_mv(3, 1150, 1156.0f, 25.0f));
     TEST_ASSERT_EQUAL_UINT16(0, pcm_step_vdroop_offset_mv(0, 1150, 1160.0f, 25.0f));
 }
+
+TEST_CASE("EMC2101 tachometer conversion guards 0x0000, 0xFFFF, and saturated RPM", "[power_control][emc2101]")
+{
+    // Invalid / stalled readings return 0 without division-by-zero panic
+    TEST_ASSERT_EQUAL_UINT16(0, pcm_emc2101_tach_to_rpm(0x0000));
+    TEST_ASSERT_EQUAL_UINT16(0, pcm_emc2101_tach_to_rpm(0xFFFF));
+
+    // Saturated counts yielding RPM == 82 are filtered to 0
+    TEST_ASSERT_EQUAL_UINT16(0, pcm_emc2101_tach_to_rpm(0xFFFE));
+    TEST_ASSERT_EQUAL_UINT16(0, pcm_emc2101_tach_to_rpm(65061));
+
+    // Valid readings convert via 5400000 / reading
+    TEST_ASSERT_EQUAL_UINT16(83, pcm_emc2101_tach_to_rpm(65060));
+    TEST_ASSERT_EQUAL_UINT16(3000, pcm_emc2101_tach_to_rpm(1800));
+    TEST_ASSERT_EQUAL_UINT16(5000, pcm_emc2101_tach_to_rpm(1080));
+    TEST_ASSERT_EQUAL_UINT16(10000, pcm_emc2101_tach_to_rpm(540));
+
+    // Extremely small non-zero glitch clamps to UINT16_MAX instead of wrapping
+    TEST_ASSERT_EQUAL_UINT16(UINT16_MAX, pcm_emc2101_tach_to_rpm(1));
+}

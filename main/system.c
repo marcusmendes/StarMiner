@@ -339,7 +339,7 @@ void SYSTEM_notify_new_ntime(GlobalState * GLOBAL_STATE, uint32_t ntime)
     settimeofday(&tv, NULL);
 }
 
-void SYSTEM_notify_found_nonce(GlobalState * GLOBAL_STATE, double diff, uint8_t job_id)
+void SYSTEM_notify_found_nonce(GlobalState * GLOBAL_STATE, double diff, uint32_t job_target)
 {
     SystemModule * module = &GLOBAL_STATE->SYSTEM_MODULE;
 
@@ -348,7 +348,7 @@ void SYSTEM_notify_found_nonce(GlobalState * GLOBAL_STATE, double diff, uint8_t 
         suffixString((uint64_t) diff, module->best_session_diff_string, DIFF_STRING_SIZE, 0);
     }
 
-    double network_diff = networkDifficulty(GLOBAL_STATE->ASIC_TASK_MODULE.active_jobs[job_id]->target);
+    double network_diff = networkDifficulty(job_target);
     if (diff >= network_diff) {
         module->block_found++;
         module->show_new_block = true;

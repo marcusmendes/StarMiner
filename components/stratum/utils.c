@@ -3,7 +3,10 @@
 #include <string.h>
 #include <stdio.h>
 #include <math.h>
+#include "sdkconfig.h"
+#ifdef CONFIG_SPIRAM
 #include "esp_psram.h"
+#endif
 #include "esp_heap_caps.h"
 
 #include "mbedtls/sha256.h"
@@ -258,6 +261,7 @@ void url_decode(char *dst, const char *src) {
 char *strdup_psram(const char *str)
 {
     if (!str) return NULL;
+#ifdef CONFIG_SPIRAM
     if (esp_psram_is_initialized()) {
         char *p = heap_caps_malloc(strlen(str) + 1, MALLOC_CAP_SPIRAM);
         if (p) {
@@ -265,5 +269,6 @@ char *strdup_psram(const char *str)
             return p;
         }
     }
+#endif
     return strdup(str);
 }

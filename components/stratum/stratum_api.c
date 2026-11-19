@@ -15,11 +15,23 @@
 #include "utils.h"
 #include "esp_timer.h"
 #include "esp_heap_caps.h"
+#include "sdkconfig.h"
+#ifdef CONFIG_SPIRAM
 #include "esp_psram.h"
+#endif
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 #include <stdbool.h>
+
+static inline bool stratum_psram_available(void)
+{
+#ifdef CONFIG_SPIRAM
+    return esp_psram_is_initialized();
+#else
+    return false;
+#endif
+}
 
 #define TRANSPORT_TIMEOUT_MS 5000
 #define BUFFER_SIZE 1024
@@ -96,7 +108,7 @@ void STRATUM_V1_initialize_buffer()
     // Free any existing buffer (may be non-NULL if a previous V1 task was running)
     free(json_rpc_buffer);
 
-    json_rpc_buffer = esp_psram_is_initialized()
+    json_rpc_buffer = stratum_psram_available()
         ? heap_caps_malloc(BUFFER_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
         : malloc(BUFFER_SIZE);
     json_rpc_buffer_size = BUFFER_SIZE;
@@ -107,7 +119,7 @@ void STRATUM_V1_initialize_buffer()
     memset(json_rpc_buffer, 0, BUFFER_SIZE);
 
     if (request_timings == NULL) {
-        request_timings = esp_psram_is_initialized()
+        request_timings = stratum_psram_available()
             ? heap_caps_malloc(sizeof(RequestTiming) * MAX_REQUEST_IDS, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
             : malloc(sizeof(RequestTiming) * MAX_REQUEST_IDS);
         if (request_timings == NULL) {
@@ -144,7 +156,7 @@ static void realloc_json_buffer(size_t len)
     }
 
     new = new + (BUFFER_SIZE - (new % BUFFER_SIZE));
-    void * new_sockbuf = esp_psram_is_initialized()
+    void * new_sockbuf = stratum_psram_available()
         ? heap_caps_realloc(json_rpc_buffer, new, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
         : realloc(json_rpc_buffer, new);
 
@@ -284,7 +296,7 @@ static bool parse_mining_notify(cJSON *json, StratumApiV1Message *message)
         return false;
     }
 
-    mining_notify *new_work = esp_psram_is_initialized()
+    mining_notify *new_work = stratum_psram_available()
         ? heap_caps_calloc(1, sizeof(mining_notify), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
         : calloc(1, sizeof(mining_notify));
     if (!new_work) {
@@ -323,7 +335,7 @@ static bool parse_mining_notify(cJSON *json, StratumApiV1Message *message)
     }
     if (new_work->n_merkle_branches > 0) {
         size_t branches_size = HASH_SIZE * new_work->n_merkle_branches;
-        new_work->merkle_branches = esp_psram_is_initialized()
+        new_work->merkle_branches = stratum_psram_available()
             ? heap_caps_malloc(branches_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
             : malloc(branches_size);
         if (!new_work->merkle_branches) {

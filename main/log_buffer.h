@@ -3,6 +3,15 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include "sdkconfig.h"
+
+#ifndef LOG_BUFFER_SIZE
+#if defined(CONFIG_SPIRAM) && CONFIG_SPIRAM
+#define LOG_BUFFER_SIZE  (512 * 1024)  /* 512 KB */
+#else
+#define LOG_BUFFER_SIZE  (16 * 1024)   /* 16 KB fallback when SPIRAM is disabled (e.g. QEMU unit tests) */
+#endif
+#endif
 
 void log_buffer_init(void);
 uint64_t log_buffer_get_total_written(void);

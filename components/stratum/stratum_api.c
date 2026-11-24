@@ -582,7 +582,7 @@ bool STRATUM_V1_parse(StratumApiV1Message *message, const char *stratum_json)
 {
     STRATUM_V1_reset_message(message);
 
-    ESP_LOGI(TAG, "rx: %s", stratum_json); // debug incoming stratum messages
+    ESP_LOGD(TAG, "rx: %s", stratum_json); // debug incoming stratum messages
 
     cJSON *json = cJSON_Parse(stratum_json);
     if (!json) {

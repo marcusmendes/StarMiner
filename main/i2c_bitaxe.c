@@ -31,6 +31,16 @@ typedef struct {
 static i2c_dev_map_entry_t i2c_device_map[MAX_DEVICES];
 static int i2c_device_count = 0;
 
+static const i2c_dev_map_entry_t *find_device_map_entry(i2c_master_dev_handle_t dev_handle)
+{
+    for (int i = 0; i < i2c_device_count; i++) {
+        if (i2c_device_map[i].handle == dev_handle) {
+            return &i2c_device_map[i];
+        }
+    }
+    return NULL;
+}
+
 static esp_err_t i2c_transfer_with_retries(i2c_master_dev_handle_t dev_handle, 
                                            const uint8_t *write_buf, size_t write_len, 
                                            uint8_t *read_buf, size_t read_len)
@@ -47,6 +57,11 @@ static esp_err_t i2c_transfer_with_retries(i2c_master_dev_handle_t dev_handle,
         if (err == ESP_OK) return ESP_OK;
 
         if (i + 1 < I2C_RETRY_COUNT) {
+            const i2c_dev_map_entry_t *entry = find_device_map_entry(dev_handle);
+            ESP_LOGW(TAG, "I2C transfer failed for [%s] (0x%02x) on attempt %d/%d (%s) - resetting bus",
+                     entry ? entry->device_tag : "unknown",
+                     (unsigned int)(entry ? entry->device_address : 0),
+                     i + 1, I2C_RETRY_COUNT, esp_err_to_name(err));
             esp_err_t reset_err = i2c_master_bus_reset(i2c_bus_handle);
             if (reset_err != ESP_OK) {
                 ESP_LOGW(TAG, "i2c_master_bus_reset failed: %s", esp_err_to_name(reset_err));
@@ -55,11 +70,10 @@ static esp_err_t i2c_transfer_with_retries(i2c_master_dev_handle_t dev_handle,
         }
     }
 
-    for (int i = 0; i < i2c_device_count; i++) {
-        if (i2c_device_map[i].handle == dev_handle) {
-            ESP_LOGE(TAG, "FATAL: [%s] (0x%02x) failed all %d retries.", i2c_device_map[i].device_tag, i2c_device_map[i].device_address, I2C_RETRY_COUNT);
-            return err;
-        }
+    const i2c_dev_map_entry_t *entry = find_device_map_entry(dev_handle);
+    if (entry != NULL) {
+        ESP_LOGE(TAG, "FATAL: [%s] (0x%02x) failed all %d retries.", entry->device_tag, entry->device_address, I2C_RETRY_COUNT);
+        return err;
     }
     
     ESP_LOGE(TAG, "Unknown device");

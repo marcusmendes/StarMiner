@@ -117,19 +117,19 @@ static void decode_mining_notification(GlobalState * GLOBAL_STATE, const mining_
         strncpy(GLOBAL_STATE->block_signals[GLOBAL_STATE->block_signals_count], "BIP-54", MAX_BLOCK_SIGNAL_LEN - 1);
         GLOBAL_STATE->block_signals[GLOBAL_STATE->block_signals_count][MAX_BLOCK_SIGNAL_LEN - 1] = '\0';
         GLOBAL_STATE->block_signals_count++;
-        ESP_LOGI(TAG, "BIP-54 signaling detected");
+        ESP_LOGD(TAG, "BIP-54 signaling detected");
     }
     if (result->bip110_signaling) {
         strncpy(GLOBAL_STATE->block_signals[GLOBAL_STATE->block_signals_count], "BIP-110", MAX_BLOCK_SIGNAL_LEN - 1);
         GLOBAL_STATE->block_signals[GLOBAL_STATE->block_signals_count][MAX_BLOCK_SIGNAL_LEN - 1] = '\0';
         GLOBAL_STATE->block_signals_count++;
-        ESP_LOGI(TAG, "BIP-110 signaling detected");
+        ESP_LOGD(TAG, "BIP-110 signaling detected");
     }
 
     // Update scriptsig
     if (result->scriptsig) {
         if (strcmp(result->scriptsig, GLOBAL_STATE->scriptsig) != 0) {
-            ESP_LOGI(TAG, "Scriptsig: %s", result->scriptsig);
+            ESP_LOGD(TAG, "Scriptsig: %s", result->scriptsig);
             strncpy(GLOBAL_STATE->scriptsig, result->scriptsig, sizeof(GLOBAL_STATE->scriptsig) - 1);
             GLOBAL_STATE->scriptsig[sizeof(GLOBAL_STATE->scriptsig) - 1] = '\0';
         }
@@ -143,7 +143,7 @@ static void decode_mining_notification(GlobalState * GLOBAL_STATE, const mining_
     }
 
     GLOBAL_STATE->coinbase_value_total_satoshis = result->total_value_satoshis;
-    ESP_LOGI(TAG, "Coinbase outputs: %d, total value: %llu%s", result->output_count, result->total_value_satoshis, result->decode_coinbase_tx ? " sats" : "");
+    ESP_LOGD(TAG, "Coinbase outputs: %d, total value: %llu%s", result->output_count, result->total_value_satoshis, result->decode_coinbase_tx ? " sats" : "");
 
     if (result->output_count != GLOBAL_STATE->coinbase_output_count ||
         memcmp(result->outputs, GLOBAL_STATE->coinbase_outputs, sizeof(coinbase_output_t) * result->output_count) != 0) {
@@ -154,12 +154,12 @@ static void decode_mining_notification(GlobalState * GLOBAL_STATE, const mining_
         for (int i = 0; i < result->output_count; i++) {
             if (result->outputs[i].value_satoshis > 0) {
                 if (result->outputs[i].is_user_output) {
-                    ESP_LOGI(TAG, "  Output %d: %s (%llu sat) (Your payout address)", i, result->outputs[i].address, result->outputs[i].value_satoshis);
+                    ESP_LOGD(TAG, "  Output %d: %s (%llu sat) (Your payout address)", i, result->outputs[i].address, result->outputs[i].value_satoshis);
                 } else {
-                    ESP_LOGI(TAG, "  Output %d: %s (%llu sat)", i, result->outputs[i].address, result->outputs[i].value_satoshis);
+                    ESP_LOGD(TAG, "  Output %d: %s (%llu sat)", i, result->outputs[i].address, result->outputs[i].value_satoshis);
                 }
             } else {
-                ESP_LOGI(TAG, "  Output %d: %s", i, result->outputs[i].address);
+                ESP_LOGD(TAG, "  Output %d: %s", i, result->outputs[i].address);
             }
         }
     }

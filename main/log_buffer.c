@@ -40,6 +40,16 @@ static EXT_RAM_NOINIT_ATTR char s_buffer[LOG_BUFFER_SIZE];
 static SemaphoreHandle_t s_log_mutex = NULL;
 static char s_vprintf_buffer[2048];
 
+static inline void log_buffer_cache_sync(void *addr, size_t size)
+{
+#if defined(CONFIG_SPIRAM) && CONFIG_SPIRAM
+    esp_cache_msync(addr, size, ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
+#else
+    (void)addr;
+    (void)size;
+#endif
+}
+
 static void ring_write(const char *data, size_t len)
 {
     if (len == 0) return;
@@ -49,19 +59,19 @@ static void ring_write(const char *data, size_t len)
 
     if (len <= till_end) {
         memcpy(&s_buffer[write_offset], data, len);
-        esp_cache_msync(&s_buffer[write_offset], len, ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
+        log_buffer_cache_sync(&s_buffer[write_offset], len);
     } else {
         memcpy(&s_buffer[write_offset], data, till_end);
-        esp_cache_msync(&s_buffer[write_offset], till_end, ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
+        log_buffer_cache_sync(&s_buffer[write_offset], till_end);
         memcpy(s_buffer, data + till_end, len - till_end);
-        esp_cache_msync(s_buffer, len - till_end, ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
+        log_buffer_cache_sync(s_buffer, len - till_end);
     }
 
     s_header.total_written += len;
     
     // Update header checksum and flush header
     s_header.checksum = calculate_header_checksum(&s_header);
-    esp_cache_msync(&s_header, sizeof(s_header), ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
+    log_buffer_cache_sync(&s_header, sizeof(s_header));
 }
 
 static int log_buffer_vprintf(const char *format, va_list args)
@@ -107,11 +117,26 @@ static int log_buffer_vprintf(const char *format, va_list args)
     if (output) {
         ring_write(output, needed);
         websocket_log_notify();
-        fputs(output, stdout);
-        
-        if (output != s_vprintf_buffer) {
-            free(output);
+
+        char *stdout_buf = NULL;
+        if (output == s_vprintf_buffer) {
+            stdout_buf = (char *)malloc((size_t)needed + 1);
+            if (stdout_buf) {
+                memcpy(stdout_buf, output, (size_t)needed + 1);
+            }
+        } else {
+            stdout_buf = output;
         }
+
+        if (stdout_buf) {
+            xSemaphoreGiveRecursive(s_log_mutex);
+            fputs(stdout_buf, stdout);
+            free(stdout_buf);
+            return needed;
+        }
+
+        /* Fallback if malloc(needed + 1) returns NULL: print while still holding s_log_mutex */
+        fputs(output, stdout);
     } else {
         /* Emergency fallback if absolutely out of memory */
         vprintf(format, args);
@@ -123,7 +148,9 @@ static int log_buffer_vprintf(const char *format, va_list args)
 
 void log_buffer_init(void)
 {
-    s_log_mutex = xSemaphoreCreateRecursiveMutex();
+    if (s_log_mutex == NULL) {
+        s_log_mutex = xSemaphoreCreateRecursiveMutex();
+    }
     if (s_log_mutex == NULL) {
         ESP_LOGW(TAG, "Failed to create recursive mutex");
         return;
@@ -133,12 +160,12 @@ void log_buffer_init(void)
 
     if (s_header.magic != LOG_BUFFER_MAGIC || s_header.checksum != expected_checksum) {
         memset(s_buffer, 0, LOG_BUFFER_SIZE);
-        esp_cache_msync(s_buffer, LOG_BUFFER_SIZE, ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
+        log_buffer_cache_sync(s_buffer, LOG_BUFFER_SIZE);
 
         s_header.total_written = 0;
         s_header.magic = LOG_BUFFER_MAGIC;
         s_header.checksum = calculate_header_checksum(&s_header);
-        esp_cache_msync(&s_header, sizeof(s_header), ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
+        log_buffer_cache_sync(&s_header, sizeof(s_header));
 
         ESP_LOGI(TAG, "Cold boot or corrupted header, buffer initialized (%d KB)\n", LOG_BUFFER_SIZE / 1024);
     } else {

@@ -1,6 +1,7 @@
 #ifndef WEBSOCKET_H_
 #define WEBSOCKET_H_
 
+#include "sdkconfig.h"
 #include "esp_err.h"
 #include "esp_http_server.h"
 #include <stdbool.h>
@@ -12,7 +13,9 @@ void websocket_set_log_task_handle(TaskHandle_t task_handle);
 
 #define MESSAGE_QUEUE_SIZE (128)
 #define MAX_WEBSOCKET_CLIENTS (10)
+#ifndef LOG_BUFFER_SIZE
 #define LOG_BUFFER_SIZE  (512 * 1024)  /* 512 KB */
+#endif
 
 typedef enum {
     WS_TYPE_LOGS,
@@ -22,8 +25,10 @@ typedef enum {
 
 esp_err_t websocket_add_client(int fd, WebSocketClientType type);
 void websocket_remove_client(int fd);
+#ifdef CONFIG_HTTPD_WS_SUPPORT
 void websocket_broadcast(WebSocketClientType type, httpd_ws_frame_t *pkt);
 void websocket_send_to_client(int fd, httpd_ws_frame_t *pkt);
+#endif
 int websocket_get_active_client_count(WebSocketClientType type);
 void websocket_init(httpd_handle_t server);
 esp_err_t websocket_handler(httpd_req_t *req);

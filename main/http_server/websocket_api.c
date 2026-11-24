@@ -12,20 +12,21 @@
 #include "cjson_utils.h"
 
 #define WEBSOCKET_API_RATE_LIMIT_MS 500
+#define WEBSOCKET_API_CONNECT_PREBUFFER_LEN 4096
+#define WEBSOCKET_API_TASK_INITIAL_PREBUFFER_LEN 256
 
 static const char *TAG = "websocket_api";
 static GlobalState *GLOBAL_STATE = NULL;
-
-static int prebuffer_len = 256;
 
 /**
  * @brief Builds the JSON update message and broadcasts it.
  * 
  * @param last_state The previous full JSON state (will be used for diffing).
  * @param fd Client file descriptor (-1 for broadcast).
+ * @param prebuffer_len Caller-owned prebuffer length hint for cJSON serialization.
  * @return cJSON* The new full JSON state that should track current reality.
  */
-static cJSON* process_and_send_update(cJSON *last_state, int fd)
+static cJSON* process_and_send_update(cJSON *last_state, int fd, int *prebuffer_len)
 {
     cJSON *current_full = system_api_get_full_json(GLOBAL_STATE);
     if (!current_full) return last_state; // Keep last state if we failed to generate new one
@@ -49,15 +50,21 @@ static cJSON* process_and_send_update(cJSON *last_state, int fd)
             cJSON_AddStringToObject(msg, "event", "update");
             cJSON_AddItemToObject(msg, "data", diff);
 
-            const char * json_str = cJSON_PrintBuffered(msg, prebuffer_len, false);
+            int buf_hint = (prebuffer_len != NULL && *prebuffer_len > 0)
+                ? *prebuffer_len
+                : WEBSOCKET_API_TASK_INITIAL_PREBUFFER_LEN;
+            const char * json_str = cJSON_PrintBuffered(msg, buf_hint, false);
             if (json_str != NULL) {
-                int len = strlen(json_str);
-                if (len > prebuffer_len) prebuffer_len = len * 1.2;
+                size_t len = strlen(json_str);
+                if (prebuffer_len != NULL && (int)len > buf_hint) {
+                    *prebuffer_len = (int)(len * 1.2);
+                }
 
                 httpd_ws_frame_t ws_pkt;
                 memset(&ws_pkt, 0, sizeof(httpd_ws_frame_t));
+                ws_pkt.final = true;
                 ws_pkt.payload = (uint8_t *)json_str;
-                ws_pkt.len = strlen(json_str);
+                ws_pkt.len = len;
                 ws_pkt.type = HTTPD_WS_TYPE_TEXT;
 
                 if (fd == -1) {
@@ -84,7 +91,8 @@ void websocket_api_on_connect(int fd)
     }
 
     // On connect, we diff against NULL to send the full current state
-    cJSON *full = process_and_send_update(NULL, fd);
+    int connect_prebuffer_len = WEBSOCKET_API_CONNECT_PREBUFFER_LEN;
+    cJSON *full = process_and_send_update(NULL, fd, &connect_prebuffer_len);
     cJSON_Delete(full);
 }
 
@@ -100,6 +108,7 @@ void websocket_api_task(void *pvParameters)
 
     // Initialize the baseline state
     cJSON *last_full_json = system_api_get_full_json(GLOBAL_STATE);
+    int task_prebuffer_len = WEBSOCKET_API_TASK_INITIAL_PREBUFFER_LEN;
 
     while (true) {
         vTaskDelay(pdMS_TO_TICKS(WEBSOCKET_API_RATE_LIMIT_MS));
@@ -119,7 +128,7 @@ void websocket_api_task(void *pvParameters)
         }
 
         // Process diff and rotate state
-        cJSON *new_full_json = process_and_send_update(last_full_json, -1);
+        cJSON *new_full_json = process_and_send_update(last_full_json, -1, &task_prebuffer_len);
         
         if (new_full_json != last_full_json) {
             cJSON_Delete(last_full_json);

@@ -1,11 +1,22 @@
 #include <string.h>
+#include "esp_attr.h"
 #include "esp_log.h"
 #include "esp_err.h"
 #include "esp_check.h"
+#include "esp_heap_caps.h"
+#include "esp_memory_utils.h"
 #include "i2c_bitaxe.h"
 #include "driver/i2c_master.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
+
+#ifndef CONFIG_GPIO_I2C_SDA
+#define CONFIG_GPIO_I2C_SDA 47
+#endif
+#ifndef CONFIG_GPIO_I2C_SCL
+#define CONFIG_GPIO_I2C_SCL 48
+#endif
 
 #define GPIO_I2C_SDA CONFIG_GPIO_I2C_SDA
 #define GPIO_I2C_SCL CONFIG_GPIO_I2C_SCL
@@ -21,6 +32,11 @@ static i2c_master_bus_handle_t i2c_bus_handle;
 
 static const char * TAG = "i2c_bitaxe";
 
+DRAM_ATTR static uint8_t s_i2c_tx_staging[I2C_STAGING_STATIC_BUF_SIZE];
+DRAM_ATTR static uint8_t s_i2c_rx_staging[I2C_STAGING_STATIC_BUF_SIZE];
+static SemaphoreHandle_t s_i2c_staging_mutex = NULL;
+static portMUX_TYPE s_i2c_staging_init_mux = portMUX_INITIALIZER_UNLOCKED;
+
 typedef struct {
     i2c_master_dev_handle_t handle;
     uint16_t device_address;
@@ -30,6 +46,110 @@ typedef struct {
 #define MAX_DEVICES 10 // Adjust as needed
 static i2c_dev_map_entry_t i2c_device_map[MAX_DEVICES];
 static int i2c_device_count = 0;
+
+static bool ensure_i2c_staging_mutex(void)
+{
+    if (s_i2c_staging_mutex != NULL) {
+        return true;
+    }
+
+    SemaphoreHandle_t created = xSemaphoreCreateMutex();
+    if (created == NULL) {
+        return false;
+    }
+
+    portENTER_CRITICAL(&s_i2c_staging_init_mux);
+    if (s_i2c_staging_mutex == NULL) {
+        s_i2c_staging_mutex = created;
+        created = NULL;
+    }
+    portEXIT_CRITICAL(&s_i2c_staging_init_mux);
+
+    if (created != NULL) {
+        vSemaphoreDelete(created);
+    }
+
+    return s_i2c_staging_mutex != NULL;
+}
+
+esp_err_t i2c_bitaxe_staging_acquire(const uint8_t *write_buf, size_t write_len,
+                                     size_t read_len, i2c_staging_buffers_t *out)
+{
+    if (out == NULL || (write_len > 0 && write_buf == NULL)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    memset(out, 0, sizeof(*out));
+    out->write_len = write_len;
+    out->read_len = read_len;
+
+    bool use_static_tx = (write_len > 0 && write_len <= I2C_STAGING_STATIC_BUF_SIZE);
+    bool use_static_rx = (read_len > 0 && read_len <= I2C_STAGING_STATIC_BUF_SIZE);
+
+    if (use_static_tx || use_static_rx) {
+        if (!ensure_i2c_staging_mutex()) {
+            return ESP_ERR_NO_MEM;
+        }
+        xSemaphoreTake(s_i2c_staging_mutex, portMAX_DELAY);
+        out->holds_static_mutex = true;
+    }
+
+    if (write_len > 0) {
+        if (use_static_tx) {
+            out->tx_buf = s_i2c_tx_staging;
+        } else {
+            out->tx_buf = (uint8_t *)heap_caps_malloc(write_len, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+            if (out->tx_buf == NULL) {
+                i2c_bitaxe_staging_commit_and_release(out, NULL, ESP_ERR_NO_MEM);
+                return ESP_ERR_NO_MEM;
+            }
+            out->tx_heap_allocated = true;
+        }
+        memcpy(out->tx_buf, write_buf, write_len);
+    }
+
+    if (read_len > 0) {
+        if (use_static_rx) {
+            out->rx_buf = s_i2c_rx_staging;
+        } else {
+            out->rx_buf = (uint8_t *)heap_caps_malloc(read_len, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+            if (out->rx_buf == NULL) {
+                i2c_bitaxe_staging_commit_and_release(out, NULL, ESP_ERR_NO_MEM);
+                return ESP_ERR_NO_MEM;
+            }
+            out->rx_heap_allocated = true;
+        }
+        memset(out->rx_buf, 0, read_len);
+    }
+
+    return ESP_OK;
+}
+
+void i2c_bitaxe_staging_commit_and_release(i2c_staging_buffers_t *staging,
+                                           uint8_t *caller_read_buf,
+                                           esp_err_t transfer_result)
+{
+    if (staging == NULL) {
+        return;
+    }
+
+    if (transfer_result == ESP_OK && caller_read_buf != NULL &&
+        staging->rx_buf != NULL && staging->read_len > 0) {
+        memcpy(caller_read_buf, staging->rx_buf, staging->read_len);
+    }
+
+    if (staging->tx_heap_allocated && staging->tx_buf != NULL) {
+        heap_caps_free(staging->tx_buf);
+    }
+    if (staging->rx_heap_allocated && staging->rx_buf != NULL) {
+        heap_caps_free(staging->rx_buf);
+    }
+    if (staging->holds_static_mutex && s_i2c_staging_mutex != NULL) {
+        xSemaphoreGive(s_i2c_staging_mutex);
+    }
+
+    memset(staging, 0, sizeof(*staging));
+}
 
 static const i2c_dev_map_entry_t *find_device_map_entry(i2c_master_dev_handle_t dev_handle)
 {
@@ -45,16 +165,28 @@ static esp_err_t i2c_transfer_with_retries(i2c_master_dev_handle_t dev_handle,
                                            const uint8_t *write_buf, size_t write_len, 
                                            uint8_t *read_buf, size_t read_len)
 {
-    esp_err_t err = ESP_FAIL;
+    size_t effective_read_len = (read_buf != NULL && read_len > 0) ? read_len : 0;
+    i2c_staging_buffers_t staging;
+    esp_err_t err = i2c_bitaxe_staging_acquire(write_buf, write_len, effective_read_len, &staging);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to prepare internal DRAM staging buffers (%s)", esp_err_to_name(err));
+        return err;
+    }
+
+    err = ESP_FAIL;
 
     for (int i = 0; i < I2C_RETRY_COUNT; i++) {
-        if (read_buf && read_len > 0) {
-            err = i2c_master_transmit_receive(dev_handle, write_buf, write_len, read_buf, read_len, I2C_MASTER_TIMEOUT_MS);
+        if (effective_read_len > 0) {
+            err = i2c_master_transmit_receive(dev_handle, staging.tx_buf, staging.write_len,
+                                              staging.rx_buf, staging.read_len, I2C_MASTER_TIMEOUT_MS);
         } else {
-            err = i2c_master_transmit(dev_handle, write_buf, write_len, I2C_MASTER_TIMEOUT_MS);
+            err = i2c_master_transmit(dev_handle, staging.tx_buf, staging.write_len, I2C_MASTER_TIMEOUT_MS);
         }
 
-        if (err == ESP_OK) return ESP_OK;
+        if (err == ESP_OK) {
+            i2c_bitaxe_staging_commit_and_release(&staging, read_buf, ESP_OK);
+            return ESP_OK;
+        }
 
         if (i + 1 < I2C_RETRY_COUNT) {
             const i2c_dev_map_entry_t *entry = find_device_map_entry(dev_handle);
@@ -69,6 +201,8 @@ static esp_err_t i2c_transfer_with_retries(i2c_master_dev_handle_t dev_handle,
             vTaskDelay(pdMS_TO_TICKS(I2C_RETRY_DELAY_MS));
         }
     }
+
+    i2c_bitaxe_staging_commit_and_release(&staging, read_buf, err);
 
     const i2c_dev_map_entry_t *entry = find_device_map_entry(dev_handle);
     if (entry != NULL) {
@@ -85,6 +219,10 @@ static esp_err_t i2c_transfer_with_retries(i2c_master_dev_handle_t dev_handle,
  */
 esp_err_t i2c_bitaxe_init(void)
 {
+    if (!ensure_i2c_staging_mutex()) {
+        return ESP_ERR_NO_MEM;
+    }
+
     i2c_master_bus_config_t i2c_bus_config = {
         .clk_source = I2C_CLK_SRC_DEFAULT,
         .i2c_port = I2C_MASTER_NUM,

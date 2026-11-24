@@ -1,9 +1,16 @@
+#include <inttypes.h>
+#include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_psram.h"
 #include "esp_heap_caps.h"
+#include "esp_system.h"
+#if CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH
+#include "esp_core_dump.h"
+#endif
 #include "cJSON.h"
 
 #include "asic_result_task.h"
@@ -60,6 +67,69 @@ static void cjson_free_psram(void *ptr)
     free(ptr);
 }
 
+#if CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH
+static void log_stored_coredump_summary(void)
+{
+    if (esp_core_dump_image_check() != ESP_OK) {
+        return;
+    }
+
+#if CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF
+    esp_core_dump_summary_t *summary = (esp_core_dump_summary_t *)calloc(1, sizeof(esp_core_dump_summary_t));
+    if (summary == NULL) {
+        ESP_LOGW(TAG, "Stored flash coredump detected, but failed to allocate summary buffer");
+        return;
+    }
+
+    if (esp_core_dump_get_summary(summary) == ESP_OK) {
+        char task_name[sizeof(summary->exc_task) + 1];
+        memcpy(task_name, summary->exc_task, sizeof(summary->exc_task));
+        task_name[sizeof(summary->exc_task)] = '\0';
+
+        char bt_str[256];
+        size_t pos = 0;
+        bt_str[0] = '\0';
+        uint32_t depth = summary->exc_bt_info.depth;
+        if (depth > 16) {
+            depth = 16;
+        }
+        for (uint32_t i = 0; i < depth && pos < sizeof(bt_str); i++) {
+            int written = snprintf(bt_str + pos, sizeof(bt_str) - pos,
+                                   "%s0x%08" PRIx32, (i == 0) ? "" : " ", summary->exc_bt_info.bt[i]);
+            if (written < 0 || (size_t)written >= sizeof(bt_str) - pos) {
+                break;
+            }
+            pos += (size_t)written;
+        }
+
+        esp_reset_reason_t reason = esp_reset_reason();
+        if (reason == ESP_RST_PANIC) {
+            ESP_LOGE(TAG,
+                     "Stored panic coredump: task=%s pc=0x%08" PRIx32 " cause=0x%08" PRIx32
+                     " vaddr=0x%08" PRIx32 " bt_depth=%" PRIu32 " corrupted=%d bt=[%s]",
+                     task_name, summary->exc_pc, summary->ex_info.exc_cause,
+                     summary->ex_info.exc_vaddr, summary->exc_bt_info.depth,
+                     summary->exc_bt_info.corrupted ? 1 : 0, bt_str);
+        } else {
+            ESP_LOGI(TAG,
+                     "Previous stored coredump (reset_reason=%d): task=%s pc=0x%08" PRIx32
+                     " cause=0x%08" PRIx32 " vaddr=0x%08" PRIx32 " bt_depth=%" PRIu32
+                     " corrupted=%d bt=[%s]",
+                     (int)reason, task_name, summary->exc_pc, summary->ex_info.exc_cause,
+                     summary->ex_info.exc_vaddr, summary->exc_bt_info.depth,
+                     summary->exc_bt_info.corrupted ? 1 : 0, bt_str);
+        }
+    } else {
+        ESP_LOGW(TAG, "Stored flash coredump present, but failed to parse ELF summary");
+    }
+
+    free(summary);
+#else
+    ESP_LOGI(TAG, "Stored flash coredump detected (reset_reason=%d)", (int)esp_reset_reason());
+#endif
+}
+#endif
+
 void app_main(void)
 {
     ESP_ERROR_CHECK(heap_caps_register_failed_alloc_callback(heap_alloc_failed_hook));
@@ -75,6 +145,10 @@ void app_main(void)
     } else {
         ESP_LOGE(TAG, "No PSRAM available on ESP32 device!");
     }
+
+#if CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH
+    log_stored_coredump_summary();
+#endif
 
     ESP_LOGI(TAG, "Welcome to the bitaxe - FOSS || GTFO!");
 

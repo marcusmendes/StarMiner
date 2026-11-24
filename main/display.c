@@ -6,6 +6,7 @@
 #include "esp_lcd_panel_io.h"
 #include "esp_lcd_panel_ops.h"
 #include "esp_err.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_check.h"
 #include "lvgl.h"
@@ -94,7 +95,7 @@ esp_err_t display_init(void * pvParameters)
     lvgl_port_cfg_t lvgl_cfg = ESP_LVGL_PORT_INIT_CONFIG();
 
     lvgl_cfg.task_affinity = 0;
-    lvgl_cfg.task_stack_caps = MALLOC_CAP_SPIRAM;
+    lvgl_cfg.task_stack_caps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
 
     if (GLOBAL_STATE->DISPLAY_CONFIG.display == NONE) {
         ESP_LOGI(TAG, "Initialize LVGL");

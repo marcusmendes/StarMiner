@@ -52,6 +52,7 @@ void websocket_log_task(void *pvParameters)
 
             httpd_ws_frame_t ws_pkt;
             memset(&ws_pkt, 0, sizeof(httpd_ws_frame_t));
+            ws_pkt.final = true;
             ws_pkt.payload = (uint8_t *)scratch_buf;
             ws_pkt.len = read_len;
             ws_pkt.type = HTTPD_WS_TYPE_TEXT;

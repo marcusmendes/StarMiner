@@ -26,18 +26,25 @@ extern "C" {
 #define DVFS_BANDIT_BETA_POWER              0.08f
 #define DVFS_BANDIT_GAMMA_CHIP_TEMP         0.06f
 #define DVFS_BANDIT_DELTA_VR_TEMP           0.05f
-#define DVFS_BANDIT_FAULT_PENALTY           1.50f
-#define DVFS_BANDIT_UCB_C                   0.12f
+#define DVFS_BANDIT_FAULT_PENALTY               1.50f
+#define DVFS_BANDIT_EFF_POWER_BASE_W            18.0f
+#define DVFS_BANDIT_EFF_POWER_SLOPE             0.008f
+#define DVFS_BANDIT_STALL_HASHRATE_RATIO        0.70f
+#define DVFS_BANDIT_CLEAN_ERR_NO_VCORE_UP_PCT   0.30f
+#define DVFS_BANDIT_VISITED_WEIGHT_FLOOR        0.20f
+#define DVFS_BANDIT_UNVISITED_PSEUDO_N          1.2f
+#define DVFS_BANDIT_SWITCH_MARGIN               0.004f
+#define DVFS_BANDIT_UCB_C                       0.015f
 
-#define DVFS_BANDIT_DISCOUNT_GAMMA          0.98f
-#define DVFS_BANDIT_DRIFT_DECAY_GAMMA       0.70f
-#define DVFS_BANDIT_DRIFT_TEMP_THRESH_C     2.5f
-#define DVFS_BANDIT_DRIFT_ERR_THRESH_PCT    0.6f
+#define DVFS_BANDIT_DISCOUNT_GAMMA              0.995f
+#define DVFS_BANDIT_DRIFT_DECAY_GAMMA           0.85f
+#define DVFS_BANDIT_DRIFT_TEMP_THRESH_C         2.5f
+#define DVFS_BANDIT_DRIFT_ERR_THRESH_PCT        1.5f
 
-#define DVFS_BANDIT_MIN_DWELL_STEPS         2
-#define DVFS_BANDIT_SAFE_STABLE_STEPS       2
-#define DVFS_BANDIT_BLACKLIST_STEPS         10
-#define DVFS_BANDIT_RECOVERY_COOLDOWN_STEPS 2
+#define DVFS_BANDIT_MIN_DWELL_STEPS             2
+#define DVFS_BANDIT_SAFE_STABLE_STEPS           2
+#define DVFS_BANDIT_BLACKLIST_STEPS             10
+#define DVFS_BANDIT_RECOVERY_COOLDOWN_STEPS     2
 
 typedef struct {
     float weight_n;
@@ -47,6 +54,7 @@ typedef struct {
     uint32_t blacklist_until_step;
     uint16_t fault_count;
     uint16_t clean_streak;
+    uint16_t visit_count;
 } DvfsBanditCell;
 
 typedef struct {
@@ -68,6 +76,7 @@ typedef struct {
 
 typedef struct {
     float hashrate_ghs;
+    float expected_hashrate_ghs;
     float error_percentage;
     float power_w;
     float chip_temp_c;

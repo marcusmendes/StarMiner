@@ -46,7 +46,8 @@ TEST_CASE("Bandit effective hashrate and multi-objective reward penalize errors,
         .vr_temp_c = 70.0f,
     };
     float r_clean = dvfs_bandit_compute_reward(&clean, false);
-    TEST_ASSERT_FLOAT_WITHIN(0.01f, 1197.6f / 1200.0f, r_clean);
+    float expected_clean = (1197.6f / 1200.0f) - (DVFS_BANDIT_EFF_POWER_SLOPE * (24.0f - DVFS_BANDIT_EFF_POWER_BASE_W));
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, expected_clean, r_clean);
 
     DvfsBanditSample stressed = {
         .hashrate_ghs = 1200.0f,
@@ -142,4 +143,151 @@ TEST_CASE("Bandit applies temporal decay on drift and rolls back on pre-watchdog
     };
     dvfs_bandit_step(&s_bandit_test_state, &drifted, &out_freq, &out_vcore, &best_freq, &best_vcore);
     TEST_ASSERT_TRUE(s_bandit_test_state.cells[safe_f][safe_v].weight_n < (weight_before + 1.0f) * 0.90f);
+}
+
+TEST_CASE("Bandit v2 converges upward from mid-range without downward bias to 500 MHz", "[dvfs_bandit]")
+{
+    dvfs_bandit_init(&s_bandit_test_state, 600.0f, 1150, 0.0f, 0);
+
+    float out_freq = 600.0f;
+    uint16_t out_vcore = 1150;
+    float best_freq = 0.0f;
+    uint16_t best_vcore = 0;
+
+    for (int step = 0; step < 14; step++) {
+        float noise = (step % 2 == 0) ? -120.0f : 120.0f;
+        float exp_hr = out_freq * 2.04f;
+        DvfsBanditSample s = {
+            .hashrate_ghs = exp_hr + noise,
+            .expected_hashrate_ghs = exp_hr,
+            .error_percentage = 0.1f,
+            .power_w = 21.0f + 0.03f * (out_freq - 600.0f),
+            .chip_temp_c = 58.0f,
+            .vr_temp_c = 66.0f,
+        };
+        dvfs_bandit_step(&s_bandit_test_state, &s, &out_freq, &out_vcore, &best_freq, &best_vcore);
+        TEST_ASSERT_TRUE(out_freq >= 600.0f);
+        TEST_ASSERT_TRUE(out_vcore <= 1150);
+    }
+
+    TEST_ASSERT_TRUE(out_freq >= 650.0f);
+    TEST_ASSERT_TRUE(best_freq >= 625.0f);
+}
+
+TEST_CASE("Bandit v2 continuous power penalty penalizes VCore inflation below 28 W", "[dvfs_bandit]")
+{
+    const float powers[] = {21.0f, 22.5f, 24.0f, 26.0f, 29.0f};
+    float prev_reward = 100.0f;
+    for (int i = 0; i < 5; i++) {
+        DvfsBanditSample s = {
+            .hashrate_ghs = 1275.0f,
+            .expected_hashrate_ghs = 1275.0f,
+            .error_percentage = 0.1f,
+            .power_w = powers[i],
+            .chip_temp_c = 58.0f,
+            .vr_temp_c = 66.0f,
+        };
+        float r = dvfs_bandit_compute_reward(&s, false);
+        TEST_ASSERT_TRUE(r < prev_reward);
+        prev_reward = r;
+    }
+
+    // At 675 MHz ceiling and clean error (0.1%), controller must not step VCore up from 1150 to 1160 mV
+    dvfs_bandit_init(&s_bandit_test_state, 675.0f, 1150, 0.0f, 0);
+    float out_freq = 675.0f;
+    uint16_t out_vcore = 1150;
+    float best_freq = 0.0f;
+    uint16_t best_vcore = 0;
+
+    DvfsBanditSample ceiling_clean = {
+        .hashrate_ghs = 1377.0f,
+        .expected_hashrate_ghs = 1377.0f,
+        .error_percentage = 0.1f,
+        .power_w = 23.0f,
+        .chip_temp_c = 58.0f,
+        .vr_temp_c = 66.0f,
+    };
+    dvfs_bandit_step(&s_bandit_test_state, &ceiling_clean, &out_freq, &out_vcore, &best_freq, &best_vcore);
+    dvfs_bandit_step(&s_bandit_test_state, &ceiling_clean, &out_freq, &out_vcore, &best_freq, &best_vcore);
+    TEST_ASSERT_TRUE(out_vcore <= 1150);
+}
+
+TEST_CASE("Bandit v2 preserves visit_count across 0.6-1.0% error ripples and decays on >=1.5% drift", "[dvfs_bandit]")
+{
+    dvfs_bandit_init(&s_bandit_test_state, 600.0f, 1150, 0.0f, 0);
+    uint8_t start_f = dvfs_bandit_freq_to_idx(600.0f);
+    uint8_t start_v = dvfs_bandit_vcore_to_idx(1150);
+
+    float out_freq = 600.0f;
+    uint16_t out_vcore = 1150;
+    float best_freq = 0.0f;
+    uint16_t best_vcore = 0;
+
+    const float ripples[] = {0.6f, 1.0f, 0.5f, 0.9f};
+    for (int i = 0; i < 4; i++) {
+        s_bandit_test_state.cur_freq_idx = start_f;
+        s_bandit_test_state.cur_vcore_idx = start_v;
+        DvfsBanditSample s = {
+            .hashrate_ghs = 1224.0f,
+            .expected_hashrate_ghs = 1224.0f,
+            .error_percentage = ripples[i],
+            .power_w = 22.0f,
+            .chip_temp_c = 58.0f,
+            .vr_temp_c = 66.0f,
+        };
+        dvfs_bandit_step(&s_bandit_test_state, &s, &out_freq, &out_vcore, &best_freq, &best_vcore);
+    }
+
+    TEST_ASSERT_EQUAL_UINT16(4, s_bandit_test_state.cells[start_f][start_v].visit_count);
+    // Repeated decay must preserve visited identity and floor weight_n at DVFS_BANDIT_VISITED_WEIGHT_FLOOR
+    for (int k = 0; k < 25; k++) {
+        dvfs_bandit_apply_decay(&s_bandit_test_state, 0.85f);
+    }
+    TEST_ASSERT_TRUE(s_bandit_test_state.cells[start_f][start_v].visit_count == 4);
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, DVFS_BANDIT_VISITED_WEIGHT_FLOOR,
+                             s_bandit_test_state.cells[start_f][start_v].weight_n);
+
+    // Move to another cell and verify >= 1.5% error jump accelerates decay on a heavy cell
+    s_bandit_test_state.cells[start_f][start_v].weight_n = 4.0f;
+    s_bandit_test_state.cells[start_f][start_v].reward_sum = 4.0f;
+    s_bandit_test_state.cur_freq_idx = start_f + 1;
+    s_bandit_test_state.cur_vcore_idx = start_v;
+    DvfsBanditSample drift_jump = {
+        .hashrate_ghs = 1249.5f,
+        .expected_hashrate_ghs = 1249.5f,
+        .error_percentage = 2.6f, // >= 1.5% jump above ~0.75% EWMA
+        .power_w = 22.5f,
+        .chip_temp_c = 58.0f,
+        .vr_temp_c = 66.0f,
+    };
+    dvfs_bandit_step(&s_bandit_test_state, &drift_jump, &out_freq, &out_vcore, &best_freq, &best_vcore);
+    TEST_ASSERT_TRUE(s_bandit_test_state.cells[start_f][start_v].weight_n < 3.6f);
+}
+
+TEST_CASE("Bandit v2 uses expected_hashrate for normal variance and falls back on severe stall", "[dvfs_bandit]")
+{
+    DvfsBanditSample low_noise = {
+        .hashrate_ghs = 1100.0f,
+        .expected_hashrate_ghs = 1275.0f,
+        .error_percentage = 0.1f,
+        .power_w = 22.5f,
+        .chip_temp_c = 58.0f,
+        .vr_temp_c = 66.0f,
+    };
+    DvfsBanditSample high_noise = low_noise;
+    high_noise.hashrate_ghs = 1420.0f;
+
+    float r_low = dvfs_bandit_compute_reward(&low_noise, false);
+    float r_high = dvfs_bandit_compute_reward(&high_noise, false);
+    TEST_ASSERT_FLOAT_WITHIN(0.0001f, r_low, r_high);
+
+    DvfsBanditSample stalled = low_noise;
+    stalled.hashrate_ghs = 600.0f; // < 0.70 * 1275.0
+    DvfsBanditSample legacy_stalled = stalled;
+    legacy_stalled.expected_hashrate_ghs = 0.0f;
+
+    float r_stalled = dvfs_bandit_compute_reward(&stalled, false);
+    float r_legacy = dvfs_bandit_compute_reward(&legacy_stalled, false);
+    TEST_ASSERT_FLOAT_WITHIN(0.0001f, r_legacy, r_stalled);
+    TEST_ASSERT_TRUE(r_stalled < r_low - 0.40f);
 }

@@ -61,6 +61,42 @@ uint16_t dvfs_bandit_idx_to_vcore(uint8_t vcore_idx)
     return pcm_clamp_vcore_mv((int32_t) raw);
 }
 
+/**
+ * @brief Selects low-variance base hashrate, falling back to measured hashrate on severe stall.
+ */
+static float select_base_hashrate_ghs(const DvfsBanditSample * sample)
+{
+    if (sample == NULL) {
+        return 0.0f;
+    }
+    float measured = (!isnan(sample->hashrate_ghs) && sample->hashrate_ghs > 0.0f) ? sample->hashrate_ghs : 0.0f;
+    float expected = (!isnan(sample->expected_hashrate_ghs) && sample->expected_hashrate_ghs > 0.0f)
+                         ? sample->expected_hashrate_ghs
+                         : 0.0f;
+    if (expected > 0.0f) {
+        if (measured < DVFS_BANDIT_STALL_HASHRATE_RATIO * expected) {
+            return fminf(expected, measured);
+        }
+        return expected;
+    }
+    return measured;
+}
+
+/**
+ * @brief Computes continuous linear power efficiency penalty plus steep >28 W ceiling barrier.
+ */
+static float compute_power_penalty(float power_w)
+{
+    if (isnan(power_w) || power_w <= DVFS_BANDIT_EFF_POWER_BASE_W) {
+        return 0.0f;
+    }
+    float penalty = DVFS_BANDIT_EFF_POWER_SLOPE * (power_w - DVFS_BANDIT_EFF_POWER_BASE_W);
+    if (power_w > 28.0f) {
+        penalty += DVFS_BANDIT_BETA_POWER * (power_w - 28.0f);
+    }
+    return penalty;
+}
+
 float dvfs_bandit_compute_effective_hashrate(float hashrate_ghs, float error_percentage)
 {
     if (isnan(hashrate_ghs) || hashrate_ghs <= 0.0f) {
@@ -79,15 +115,14 @@ float dvfs_bandit_compute_reward(const DvfsBanditSample * sample, bool fault_occ
         return fault_occurred ? -DVFS_BANDIT_FAULT_PENALTY : 0.0f;
     }
 
-    float heff = dvfs_bandit_compute_effective_hashrate(sample->hashrate_ghs, sample->error_percentage);
+    float base_hr = select_base_hashrate_ghs(sample);
+    float heff = dvfs_bandit_compute_effective_hashrate(base_hr, sample->error_percentage);
     float reward = heff / DVFS_BANDIT_NORM_HASHRATE_GHS;
 
     if (!isnan(sample->error_percentage) && sample->error_percentage > 0.5f) {
         reward -= DVFS_BANDIT_ALPHA_ERR * (sample->error_percentage - 0.5f);
     }
-    if (!isnan(sample->power_w) && sample->power_w > 28.0f) {
-        reward -= DVFS_BANDIT_BETA_POWER * (sample->power_w - 28.0f);
-    }
+    reward -= compute_power_penalty(sample->power_w);
     if (!isnan(sample->chip_temp_c) && sample->chip_temp_c > 62.0f) {
         reward -= DVFS_BANDIT_GAMMA_CHIP_TEMP * (sample->chip_temp_c - 62.0f);
     }
@@ -140,8 +175,21 @@ void dvfs_bandit_apply_decay(DvfsBanditState * state, float gamma)
     float g = isnan(gamma) ? 1.0f : fmaxf(0.0f, fminf(1.0f, gamma));
     for (int f = 0; f < DVFS_BANDIT_FREQ_STEPS; f++) {
         for (int v = 0; v < DVFS_BANDIT_VCORE_STEPS; v++) {
-            state->cells[f][v].weight_n *= g;
-            state->cells[f][v].reward_sum *= g;
+            DvfsBanditCell * cell = &state->cells[f][v];
+            if (g <= 0.0f) {
+                cell->weight_n = 0.0f;
+                cell->reward_sum = 0.0f;
+            } else if (cell->weight_n > 0.0f) {
+                float new_w = cell->weight_n * g;
+                float new_r = cell->reward_sum * g;
+                if (cell->visit_count > 0 && new_w < DVFS_BANDIT_VISITED_WEIGHT_FLOOR) {
+                    float mean = cell->reward_sum / cell->weight_n;
+                    new_w = DVFS_BANDIT_VISITED_WEIGHT_FLOOR;
+                    new_r = mean * new_w;
+                }
+                cell->weight_n = new_w;
+                cell->reward_sum = new_r;
+            }
         }
     }
 }
@@ -193,13 +241,17 @@ void dvfs_bandit_step(DvfsBanditState * state,
     }
 
     DvfsBanditCell * cur_cell = &state->cells[state->cur_freq_idx][state->cur_vcore_idx];
-    float heff = dvfs_bandit_compute_effective_hashrate(sample->hashrate_ghs, err_pct);
+    float base_hr = select_base_hashrate_ghs(sample);
+    float heff = dvfs_bandit_compute_effective_hashrate(base_hr, err_pct);
     float reward = dvfs_bandit_compute_reward(sample, false);
 
     cur_cell->weight_n += 1.0f;
     cur_cell->reward_sum += reward;
     cur_cell->avg_heff_ghs = (cur_cell->avg_heff_ghs <= 0.0f) ? heff : (0.5f * cur_cell->avg_heff_ghs + 0.5f * heff);
     cur_cell->last_visited_step = state->total_steps;
+    if (cur_cell->visit_count < UINT16_MAX) {
+        cur_cell->visit_count++;
+    }
 
     bool clean_sample = (err_pct <= 0.8f) && (power_w <= 30.5f) && (chip_temp < 65.5f) &&
                         (vr_temp < 84.0f) && (heff > 0.0f);
@@ -241,8 +293,14 @@ void dvfs_bandit_step(DvfsBanditState * state,
 
         bool allow_positive = (power_w < 30.0f) && (chip_temp < 64.5f) && (vr_temp < 82.0f);
         float cur_mean = (cur_cell->weight_n > 0.01f) ? (cur_cell->reward_sum / cur_cell->weight_n) : reward;
-        float cur_ucb = cur_mean + (DVFS_BANDIT_UCB_C * sqrtf(logf(total_weight + 1.0f) / fmaxf(0.25f, cur_cell->weight_n)));
+        float cur_ucb = cur_mean + (DVFS_BANDIT_UCB_C * sqrtf(logf(total_weight + 1.0f) /
+                                                               fmaxf(DVFS_BANDIT_VISITED_WEIGHT_FLOOR, cur_cell->weight_n)));
 
+        float base_heff = (cur_cell->avg_heff_ghs > 0.0f) ? cur_cell->avg_heff_ghs : heff;
+        float ref_power = (power_w > 10.0f) ? power_w : 22.0f;
+        float ref_power_pen = compute_power_penalty(ref_power);
+
+        bool found_better = false;
         uint8_t best_f = state->cur_freq_idx;
         uint8_t best_v = state->cur_vcore_idx;
         float best_ucb = cur_ucb;
@@ -258,6 +316,12 @@ void dvfs_bandit_step(DvfsBanditState * state,
                 if (!allow_positive && (df > 0 || dv > 0)) {
                     continue;
                 }
+                if (df == 0 && dv > 0 && err_pct <= DVFS_BANDIT_CLEAN_ERR_NO_VCORE_UP_PCT) {
+                    continue;
+                }
+                if (df > 0 && err_pct > 0.5f) {
+                    continue;
+                }
 
                 int32_t nf = (int32_t) state->cur_freq_idx + df;
                 int32_t nv = (int32_t) state->cur_vcore_idx + dv;
@@ -271,14 +335,29 @@ void dvfs_bandit_step(DvfsBanditState * state,
                 }
 
                 float ucb;
-                if (cand->weight_n < 0.05f) {
-                    ucb = cur_mean + (DVFS_BANDIT_UCB_C * sqrtf(logf(total_weight + 1.0f) / 0.25f));
+                if (cand->visit_count == 0 || cand->weight_n <= 0.0f) {
+                    float cand_freq = dvfs_bandit_idx_to_freq((uint8_t) nf);
+                    uint16_t cand_vcore = dvfs_bandit_idx_to_vcore((uint8_t) nv);
+                    float freq_ratio_delta = (cand_freq - cur_freq) / cur_freq;
+                    float vcore_ratio_delta = ((float) ((int32_t) cand_vcore - (int32_t) cur_vcore)) / (float) cur_vcore;
+                    float delta_heff_norm = (base_heff / DVFS_BANDIT_NORM_HASHRATE_GHS) * freq_ratio_delta;
+                    float est_delta_power_w = ref_power * (freq_ratio_delta + (2.0f * vcore_ratio_delta));
+                    float delta_power_pen = compute_power_penalty(ref_power + est_delta_power_w) - ref_power_pen;
+                    float prior_mean = cur_mean + delta_heff_norm - delta_power_pen;
+                    ucb = prior_mean + (DVFS_BANDIT_UCB_C * sqrtf(logf(total_weight + 1.0f) / DVFS_BANDIT_UNVISITED_PSEUDO_N));
                 } else {
                     float mean = cand->reward_sum / cand->weight_n;
-                    ucb = mean + (DVFS_BANDIT_UCB_C * sqrtf(logf(total_weight + 1.0f) / cand->weight_n));
+                    ucb = mean + (DVFS_BANDIT_UCB_C * sqrtf(logf(total_weight + 1.0f) /
+                                                           fmaxf(DVFS_BANDIT_VISITED_WEIGHT_FLOOR, cand->weight_n)));
                 }
 
-                if (ucb > (best_ucb + 0.01f)) {
+                if (ucb <= (cur_ucb + DVFS_BANDIT_SWITCH_MARGIN)) {
+                    continue;
+                }
+
+                if (!found_better || (ucb > (best_ucb + 1e-5f)) ||
+                    (fabsf(ucb - best_ucb) <= 1e-5f && (nf > (int32_t) best_f || (nf == (int32_t) best_f && nv < (int32_t) best_v)))) {
+                    found_better = true;
                     best_ucb = ucb;
                     best_f = (uint8_t) nf;
                     best_v = (uint8_t) nv;
@@ -321,6 +400,9 @@ void dvfs_bandit_record_fault_and_rollback(DvfsBanditState * state,
     cur_cell->reward_sum -= DVFS_BANDIT_FAULT_PENALTY * (is_hard_watchdog ? 2.0f : 1.0f);
     cur_cell->fault_count++;
     cur_cell->clean_streak = 0;
+    if (cur_cell->visit_count < UINT16_MAX) {
+        cur_cell->visit_count++;
+    }
     cur_cell->blacklist_until_step = state->total_steps +
                                      (is_hard_watchdog ? (DVFS_BANDIT_BLACKLIST_STEPS * 2U) : DVFS_BANDIT_BLACKLIST_STEPS);
 

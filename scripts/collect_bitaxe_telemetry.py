@@ -78,6 +78,9 @@ CSV_COLUMNS = [
     "response_time_ms",
     "process_time_ms",
     "stratum_url",
+    "pre_watchdog_recoveries",
+    "adaptive_best_freq",
+    "adaptive_best_vcore",
 ]
 
 
@@ -89,6 +92,7 @@ class HostPrevState:
     uptime_s: Optional[int] = None
     cml_error_count: Optional[int] = None
     watchdog_resets: Optional[int] = None
+    pre_watchdog_recoveries: Optional[int] = None
     throttle_active: Optional[int] = None
     overheat_mode: Optional[int] = None
     low_sram_alerted: bool = False
@@ -263,6 +267,9 @@ def build_csv_row(
     row["response_time_ms"] = fmt_num(to_float(payload.get("responseTime")), 3)
     row["process_time_ms"] = fmt_num(to_float(payload.get("processTime")), 3)
     row["stratum_url"] = str(payload.get("stratumURL", ""))
+    row["pre_watchdog_recoveries"] = fmt_num(to_float(payload.get("preWatchdogRecoveries")), 0)
+    row["adaptive_best_freq"] = fmt_num(to_float(payload.get("adaptiveBestFreq")), 2)
+    row["adaptive_best_vcore"] = fmt_num(to_float(payload.get("adaptiveBestVcore")), 0)
     return row
 
 
@@ -324,6 +331,16 @@ def emit_transition_alerts(ts_str: str, host: str, row: Dict[str, str], prev: Ho
                 flush=True,
             )
         prev.watchdog_resets = wd
+
+    pre_wd = to_int(row.get("pre_watchdog_recoveries", ""))
+    if pre_wd is not None:
+        if prev.pre_watchdog_recoveries is not None and pre_wd > prev.pre_watchdog_recoveries:
+            print(
+                f"[{ts_str}] ALERT {host}: preWatchdogRecoveries increased ({prev.pre_watchdog_recoveries} -> {pre_wd}, "
+                f"freq={row['freq_mhz']}MHz, vcore={row['vcore_cmd_mv']}mV)",
+                flush=True,
+            )
+        prev.pre_watchdog_recoveries = pre_wd
 
     throttle = to_int(row["throttle_active"])
     if throttle is not None:
@@ -403,6 +420,7 @@ def analyze_csv(csv_path: Path) -> int:
 
         cmls = [v for r in ok_rows if (v := to_int(r.get("cml_error_count"))) is not None]
         wds = [v for r in ok_rows if (v := to_int(r.get("watchdog_resets"))) is not None]
+        pre_wds = [v for r in ok_rows if (v := to_int(r.get("pre_watchdog_recoveries"))) is not None]
         stales = [v for r in ok_rows if (v := to_int(r.get("stale_rejected"))) is not None]
         throttles = sum(1 for r in ok_rows if to_int(r.get("throttle_active")) == 1)
         srams = [v for r in ok_rows if (v := to_int(r.get("free_heap_internal"))) is not None]
@@ -415,6 +433,15 @@ def analyze_csv(csv_path: Path) -> int:
         vr_temps = [v for r in ok_rows if (v := to_float(r.get("vr_temp_c"))) is not None]
         rtts = sorted(v for r in ok_rows if (v := to_float(r.get("response_time_ms"))) is not None)
         dom_ratios = sorted(v for r in ok_rows if (v := to_float(r.get("dom_min_ratio"))) is not None)
+        adaptive_points = [
+            (f, v)
+            for r in ok_rows
+            if (f := to_float(r.get("adaptive_best_freq"))) is not None
+            and (v := to_int(r.get("adaptive_best_vcore"))) is not None
+            and f > 0.0
+            and v > 0
+        ]
+        dvfs_profiles = [v for r in ok_rows if (v := to_int(r.get("dvfs_profile"))) is not None]
 
         hostname = ok_rows[-1].get("hostname", "") if ok_rows else ""
         version = ok_rows[-1].get("version", "") if ok_rows else ""
@@ -422,11 +449,16 @@ def analyze_csv(csv_path: Path) -> int:
         print(f"  Samples      : ok={len(ok_rows)}, fail={fail_count}, span={span_h:.2f} h")
         cml_delta = (max(cmls) - min(cmls)) if len(cmls) >= 2 else 0
         wd_delta = (max(wds) - min(wds)) if len(wds) >= 2 else 0
+        pre_wd_delta = (max(pre_wds) - min(pre_wds)) if len(pre_wds) >= 2 else 0
         stale_delta = (max(stales) - min(stales)) if len(stales) >= 2 else 0
         print(
             f"  Soak Health  : reboots={reboots}, cml_delta={cml_delta}, wd_delta={wd_delta}, "
-            f"throttle_samples={throttles}"
+            f"pre_wd_delta={pre_wd_delta}, throttle_samples={throttles}"
         )
+        if pre_wds or adaptive_points or (4 in dvfs_profiles):
+            pre_wd_total = max(pre_wds) if pre_wds else 0
+            best_safe_str = f"{adaptive_points[-1][0]:.1f} MHz @ {adaptive_points[-1][1]} mV" if adaptive_points else "none"
+            print(f"  Adaptive DVFS: pre_wd_total={pre_wd_total} (delta={pre_wd_delta}), best_safe={best_safe_str}")
         if srams:
             print(f"  Internal SRAM: min={min(srams)} B, avg={statistics.mean(srams):.0f} B")
         if h_effs and powers and jths:
@@ -508,12 +540,87 @@ def parse_args() -> argparse.Namespace:
         default="",
         help="Analyze an existing telemetry.csv file and exit",
     )
+    parser.add_argument(
+        "--self-test",
+        action="store_true",
+        help="Run built-in collector/analyzer self-tests and exit",
+    )
     return parser.parse_args()
+
+
+def run_self_test() -> int:
+    """Verify CSV column parity, transition alert generation, and analyze_csv behavior."""
+    import contextlib
+    import io
+    import tempfile
+
+    for col in ("pre_watchdog_recoveries", "adaptive_best_freq", "adaptive_best_vcore"):
+        assert col in CSV_COLUMNS, f"Missing column {col} in CSV_COLUMNS"
+
+    base_payload = {
+        "hostname": "bitaxe-test",
+        "version": "v2-test",
+        "uptimeSeconds": 120,
+        "dvfsProfile": 4,
+        "targetFrequency": 625,
+        "frequency": 637.5,
+        "targetVoltage": 1150,
+        "coreVoltage": 1155,
+        "power": 24.5,
+        "temp": 58.5,
+        "vrTemp": 65.0,
+        "hashRate": 1300.0,
+        "hashRate_1m": 1300.0,
+        "expectedHashrate": 1300.5,
+        "errorPercentage": 0.15,
+        "cmlErrorCount": 0,
+        "watchdogResets": 0,
+        "preWatchdogRecoveries": 1,
+        "adaptiveBestFreq": 637.5,
+        "adaptiveBestVcore": 1150,
+        "freeHeapInternal": 152000,
+    }
+    now_dt = datetime.now().astimezone()
+    row1 = build_csv_row(now_dt, 1000.0, "192.168.1.103", base_payload)
+    assert row1["pre_watchdog_recoveries"] == "1"
+    assert row1["adaptive_best_freq"] == "637.5"
+    assert row1["adaptive_best_vcore"] == "1150"
+
+    row2_payload = dict(base_payload, uptimeSeconds=135, preWatchdogRecoveries=2, adaptiveBestFreq=650.0, adaptiveBestVcore=1160)
+    row2 = build_csv_row(now_dt, 1015.0, "192.168.1.103", row2_payload)
+
+    buf = io.StringIO()
+    prev = HostPrevState()
+    with contextlib.redirect_stdout(buf):
+        emit_transition_alerts("12:00:00", "192.168.1.103", row1, prev)
+        emit_transition_alerts("12:00:15", "192.168.1.103", row2, prev)
+    alert_out = buf.getvalue()
+    assert "preWatchdogRecoveries increased (1 -> 2" in alert_out, f"Missing alert in: {alert_out}"
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        csv_file = Path(tmpdir) / "telemetry.csv"
+        with csv_file.open("w", newline="", encoding="utf-8") as fh:
+            writer = csv.DictWriter(fh, fieldnames=CSV_COLUMNS)
+            writer.writeheader()
+            writer.writerow(row1)
+            writer.writerow(row2)
+        analyze_buf = io.StringIO()
+        with contextlib.redirect_stdout(analyze_buf):
+            rc = analyze_csv(csv_file)
+        assert rc == 0
+        summary = analyze_buf.getvalue()
+        assert "pre_wd_delta=1" in summary, f"Missing pre_wd_delta in: {summary}"
+        assert "Adaptive DVFS: pre_wd_total=2 (delta=1), best_safe=650.0 MHz @ 1160 mV" in summary, f"Missing Adaptive DVFS line in: {summary}"
+
+    print("Self-test PASSED.")
+    return 0
 
 
 def main() -> int:
     """Run either analysis mode or continuous telemetry collection."""
     args = parse_args()
+    if args.self_test:
+        return run_self_test()
     if args.analyze:
         return analyze_csv(Path(args.analyze))
 

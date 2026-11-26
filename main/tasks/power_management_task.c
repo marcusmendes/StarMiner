@@ -569,6 +569,7 @@ static void handle_dvfs_autotuner(GlobalState * GLOBAL_STATE)
                 float active_hr = (sys_module->hashrate_1m > 0.0f) ? sys_module->hashrate_1m : sys_module->current_hashrate;
                 DvfsBanditSample sample = {
                     .hashrate_ghs = active_hr,
+                    .expected_hashrate_ghs = power_management->expected_hashrate,
                     .error_percentage = err_pct,
                     .power_w = power,
                     .chip_temp_c = chip_temp,

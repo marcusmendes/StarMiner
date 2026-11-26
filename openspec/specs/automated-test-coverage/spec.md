@@ -51,11 +51,15 @@ A suíte Unity em `components/asic/test/test_power_control.c` (executada em `tes
 - **THEN** `Manual` e `Balanced` nunca elevam `VCore`, `Efficiency` e `Performance` aplicam `+5 mV` apenas dentro de `1250 mV` / `30.5 W` / `84.0 °C` e o recuo de frequência nunca ultrapassa o piso de `400.0 MHz`
 
 ### Requirement: Adaptive 2D Bandit Unit Tests in C
-The `components/asic/test/` Unity suite SHALL test the pure C 2D Contextual Bandit controller (`dvfs_bandit`), covering grid indexing, hard caps (`400.0–675.0 MHz`, `1000–1250 mV`), reward computation, hysteresis, temporal decay, pre-watchdog/watchdog rollback and cell penalty, and updated `PcmRtcDiagnostics` CRC32 round-trip.
+The `components/asic/test/` Unity suite SHALL test the v2 `dvfs_bandit` controller and `PcmRtcDiagnostics` CRC32 round-trip, covering grid indexing, hard caps, continuous power penalty, physics-prior upward convergence without downward bias, `expected_hashrate` stall fallback, hysteresis, visited-cell immunity to error ripples, temporal decay, and pre-watchdog/watchdog rollback.
 
 #### Scenario: Bandit grid convergence, penalties, and rollback pass Unity tests
-- **WHEN** `test` / `test-ci` executes the `dvfs_bandit` and `power_control` Unity test cases
-- **THEN** assertions verify that step commands respect grid step sizes and hard caps, pre-watchdog/watchdog feedback rolls back to the last proven safe point and penalizes the fault cell, temporal discounting decays stale observations, and `PcmRtcDiagnostics` serialization preserves `adaptive_best_freq_mhz` and `adaptive_best_vcore_mv` across CRC validation
+- **WHEN** `test` / `test-ci` executes the `dvfs_bandit` and `power_control` Unity test cases covering fault rollback, `~0.6–1.0%` error ripples, `>= 2.5 °C` thermal drift, and `PcmRtcDiagnostics` serialization
+- **THEN** assertions verify that step commands respect grid step sizes and hard caps, pre-watchdog/watchdog feedback rolls back to the last proven safe point and penalizes the fault cell, visited cells retain their visited state across minor error ripples while real drift decays weights, and `PcmRtcDiagnostics` preserves `adaptive_best_freq_mhz` and `adaptive_best_vcore_mv` across CRC validation
+
+#### Scenario: Bandit v2 converges upward without downward bias and penalizes VCore inflation
+- **WHEN** `test` / `test-ci` exercises unvisited neighbor selection from a mid-range operating point (`600.0–625.0 MHz`) and fixed-frequency VCore sweeps below `28.0 W`
+- **THEN** assertions verify the controller climbs when thermal/power/error headroom allows (rather than drifting to `500 MHz`), prefers lower wattage at equal frequency and clean error, and falls back to measured hashrate when actual output stalls well below `expected_hashrate`
 
 ### Requirement: AxeOS Unit Tests for Adaptive Profile and Extended Telemetry
 The frontend Jasmine suites (`edit.component.spec.ts`, `home.component.spec.ts`, `system.component.spec.ts`) SHALL test `dvfsProfile = 4` (`Adaptive`) selection, validation up to `4`, label rendering, and display of `preWatchdogRecoveries` and adaptive safe-point telemetry.

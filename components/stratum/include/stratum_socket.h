@@ -27,4 +27,8 @@ esp_err_t stratum_socket_resolve(const char *hostname, uint16_t port, stratum_co
 // by both the SV1 and SV2 stratum tasks.
 void stratum_socket_set_options(esp_transport_handle_t transport);
 
+// Apply pool-socket options tuned for the active coin's target block time.
+// Fast-block coins (<= 60 s) use shorter receive timeouts and keepalive probes.
+void stratum_socket_set_options_for_coin(esp_transport_handle_t transport, uint32_t block_time_s);
+
 #endif /* STRATUM_SOCKET_H_ */

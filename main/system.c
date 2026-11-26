@@ -101,6 +101,7 @@ void SYSTEM_init_system(GlobalState * GLOBAL_STATE)
 
     // use fallback stratum
     module->use_fallback_stratum = nvs_config_get_bool(NVS_CONFIG_USE_FALLBACK_STRATUM);
+    module->stratum_smart_failover = nvs_config_get_bool(NVS_CONFIG_STRATUM_SMART_FAILOVER);
 
     // set based on config
     module->is_using_fallback = module->use_fallback_stratum;
@@ -160,9 +161,14 @@ void SYSTEM_init_system(GlobalState * GLOBAL_STATE)
     free(proto_str);
     GLOBAL_STATE->sv2_conn = NULL;
 
-    // Initialize mutexes
+    // Initialize mutexes and pool health tracking
     pthread_mutex_init(&GLOBAL_STATE->valid_jobs_lock, NULL);
+    pthread_mutex_init(&GLOBAL_STATE->pool_score_lock, NULL);
     GLOBAL_STATE->stratum_mux = (portMUX_TYPE)portMUX_INITIALIZER_UNLOCKED;
+    GLOBAL_STATE->job_epoch = 1;
+    GLOBAL_STATE->stale_shares_suppressed = 0;
+    GLOBAL_STATE->smart_failover_count = 0;
+    pool_score_init(&GLOBAL_STATE->pool_score);
 }
 
 void SYSTEM_init_versions(GlobalState * GLOBAL_STATE) {
@@ -295,6 +301,7 @@ void SYSTEM_clean_jobs_queue(GlobalState * GLOBAL_STATE)
     queue_clear(&GLOBAL_STATE->stratum_queue);
 
     pthread_mutex_lock(&GLOBAL_STATE->valid_jobs_lock);
+    GLOBAL_STATE->job_epoch++;
     if (GLOBAL_STATE->valid_jobs != NULL) {
         memset(GLOBAL_STATE->valid_jobs, 0, sizeof(uint8_t) * 128);
     }

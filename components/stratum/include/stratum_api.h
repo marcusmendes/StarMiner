@@ -49,6 +49,7 @@ typedef struct
     uint32_t target;
     uint32_t ntime;
     bool clean_jobs;
+    uint32_t job_epoch;
 } mining_notify;
 
 typedef struct

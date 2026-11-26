@@ -537,6 +537,17 @@ private isIpAddress(value: string): boolean {
     }
   }
 
+  public getPoolHealthBadgeClass(score?: number): string {
+    const val = score ?? 100;
+    if (val >= 80) {
+      return 'p-badge-success';
+    }
+    if (val >= 50) {
+      return 'p-badge-warning';
+    }
+    return 'p-badge-danger';
+  }
+
   public getLearnedBoundsTooltip(axe: any): string {
     const parts: string[] = [];
     if ((axe?.adaptiveBestFreq ?? 0) > 0 && (axe?.adaptiveBestVcore ?? 0) > 0) {

@@ -14,6 +14,7 @@
 #include "device_config.h"
 #include "display.h"
 #include "scoreboard.h"
+#include "pool_score.h"
 #include "esp_transport.h"
 
 typedef enum {
@@ -91,6 +92,7 @@ typedef struct
     float process_time;
     float cpu_usage;
     bool use_fallback_stratum;
+    bool stratum_smart_failover;
     uint16_t pool_is_tls;
     uint16_t fallback_pool_is_tls;
     uint16_t pool_tls;
@@ -204,6 +206,12 @@ typedef struct
     uint8_t coin_decimals;
     uint16_t coin_block_time_s;
     bool coin_user_is_address;
+
+    uint32_t job_epoch;
+    PoolScoreState pool_score;
+    pthread_mutex_t pool_score_lock;
+    uint64_t stale_shares_suppressed;
+    uint32_t smart_failover_count;
 } GlobalState;
 
 #endif /* GLOBAL_STATE_H_ */

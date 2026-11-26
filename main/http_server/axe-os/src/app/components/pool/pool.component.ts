@@ -132,7 +132,8 @@ export class PoolComponent implements OnInit {
           fallbackStratumProtocol: [info.fallbackStratumProtocol || 'SV1'],
           fallbackStratumV2AuthorityPubkey: [info.fallbackStratumV2AuthorityPubkey || '', [this.base58Validator()]],
           stratumV2ChannelType: [info.stratumV2ChannelType || 'standard'],
-          fallbackStratumV2ChannelType: [info.fallbackStratumV2ChannelType || 'standard']
+          fallbackStratumV2ChannelType: [info.fallbackStratumV2ChannelType || 'standard'],
+          stratumSmartFailover: [info.stratumSmartFailover == true]
         });
 
         const setupTlsValidation = (tlsControlName: string, certControlName: string) => {

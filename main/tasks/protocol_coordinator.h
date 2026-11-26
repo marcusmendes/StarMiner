@@ -17,6 +17,9 @@ void protocol_coordinator_notify_failure(void);
 // Resets the "all pools unreachable" failure counter and clears pools_unavailable.
 void protocol_coordinator_notify_success(void);
 
+// Called when sustained pool health degradation crosses smart failover thresholds.
+void protocol_coordinator_notify_degraded(void);
+
 // V1 task checks this to know when to shut down gracefully
 bool protocol_coordinator_v1_should_shutdown(void);
 

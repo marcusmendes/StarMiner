@@ -49,7 +49,8 @@ describe('PoolComponent', () => {
       fallbackStratumDecodeCoinbase: true,
       fallbackStratumCoinProfile: 1,
       fallbackStratumV2AuthorityPubkey: '',
-      fallbackStratumV2ChannelType: 'extended'
+      fallbackStratumV2ChannelType: 'extended',
+      stratumSmartFailover: false
     };
 
     const mockLiveDataService = {
@@ -98,5 +99,16 @@ describe('PoolComponent', () => {
     const payload = systemServiceSpy.updateSystem.calls.mostRecent().args[1];
     expect(payload.stratumCoinProfile).toBe(7);
     expect(payload.fallbackStratumCoinProfile).toBe(1);
+  });
+
+  it('should initialize stratumSmartFailover as false and submit updated toggle state', () => {
+    const failoverCtrl = component.form.get('stratumSmartFailover');
+    expect(failoverCtrl?.value).toBeFalse();
+
+    failoverCtrl?.setValue(true);
+    component.updateSystem();
+    expect(systemServiceSpy.updateSystem).toHaveBeenCalled();
+    const payload = systemServiceSpy.updateSystem.calls.mostRecent().args[1];
+    expect(payload.stratumSmartFailover).toBeTrue();
   });
 });

@@ -14,6 +14,7 @@
 #include "cjson_utils.h"
 #include "statistics_task.h"
 #include "stratum_v2_task.h"
+#include "pool_score.h"
 
 
 static const char *get_reset_reason_str(esp_reset_reason_t reason)
@@ -106,6 +107,20 @@ static void system_api_add_telemetry(cJSON *root, GlobalState *g) {
     cJSON_AddNumberToObject(root, "coinDecimals", g->coin_decimals > 0 ? g->coin_decimals : 8);
     cJSON_AddNumberToObject(root, "coinBlockTimeSeconds", g->coin_block_time_s > 0 ? g->coin_block_time_s : 600);
     cJSON_AddNumberToObject(root, "coinUserIsAddress", g->coin_user_is_address ? 1 : 0);
+
+    pthread_mutex_lock(&g->pool_score_lock);
+    float pool_health = pool_score_get_current(&g->pool_score,
+                                               g->coin_block_time_s > 0 ? g->coin_block_time_s : 600,
+                                               esp_timer_get_time());
+    float pool_rtt_ewma = g->pool_score.rtt_ewma_ms;
+    float pool_stale_pct = g->pool_score.stale_rate_pct;
+    pthread_mutex_unlock(&g->pool_score_lock);
+
+    cJSON_AddFloatToObject(root, "poolHealthScore", pool_health);
+    cJSON_AddFloatToObject(root, "poolRttEwmaMs", pool_rtt_ewma);
+    cJSON_AddFloatToObject(root, "poolStaleRatePct", pool_stale_pct);
+    cJSON_AddNumberToObject(root, "staleSharesSuppressed", g->stale_shares_suppressed);
+    cJSON_AddNumberToObject(root, "smartFailoverCount", g->smart_failover_count);
     cJSON_AddStringToObject(root, "wifiStatus", g->SYSTEM_MODULE.wifi_status);
 
     int8_t rssi = -90;
@@ -163,6 +178,7 @@ static void system_api_add_config(cJSON *root, GlobalState *g) {
     // Pool Configuration
     cJSON_AddStringToObject(root, "poolConnectionInfo", g->SYSTEM_MODULE.pool_connection_info);
     cJSON_AddNumberToObject(root, "isUsingFallbackStratum", g->SYSTEM_MODULE.is_using_fallback ? 1 : 0);
+    cJSON_AddBoolToObject(root, "stratumSmartFailover", nvs_config_get_bool(NVS_CONFIG_STRATUM_SMART_FAILOVER));
     
     char *s_url = nvs_config_get_string(NVS_CONFIG_STRATUM_URL);
     cJSON_AddStringToObject(root, "stratumURL", s_url ? s_url : "");

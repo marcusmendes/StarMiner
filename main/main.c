@@ -273,7 +273,7 @@ void app_main(void)
     }
 
     protocol_coordinator_init(&GLOBAL_STATE);
-    if (xTaskCreatePinnedToCoreWithCaps(protocol_coordinator_task, "protocol coord", 3072, (void *) &GLOBAL_STATE, 5, NULL, 0, psram_stack_caps()) != pdPASS) {
+    if (xTaskCreatePinnedToCoreWithCaps(protocol_coordinator_task, "protocol coord", 8192, (void *) &GLOBAL_STATE, 5, NULL, 0, psram_stack_caps()) != pdPASS) {
         ESP_LOGE(TAG, "Error creating protocol coordinator task");
     }
 

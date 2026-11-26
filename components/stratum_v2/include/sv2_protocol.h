@@ -59,6 +59,7 @@ typedef struct {
     uint32_t ntime;
     uint32_t nbits;
     bool clean_jobs;
+    uint32_t job_epoch;
 } sv2_job_t;
 
 // Pending future job (waiting for SetNewPrevHash)
@@ -78,6 +79,7 @@ typedef struct {
     uint32_t ntime;
     uint32_t nbits;
     bool     clean_jobs;
+    uint32_t job_epoch;
     uint8_t  merkle_path[SV2_MAX_MERKLE_BRANCHES][32];
     uint8_t  merkle_path_count;
     uint8_t *coinbase_prefix;     // heap

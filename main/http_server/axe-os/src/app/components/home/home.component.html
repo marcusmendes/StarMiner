@@ -490,6 +490,40 @@
                             </div>
                             <div>{{ activePoolProtocol }}</div>
                         </div>
+                        <div class="flex flex-nowrap align-items-center">
+                            <div class="col-fixed-width text-500">
+                                <tooltip-text-icon
+                                    text="Health"
+                                    tooltip="Rolling pool health score (0-100) normalized for the active coin's block time, combining RTT EWMA, stale rate, and disconnects."
+                                />
+                            </div>
+                            <div class="flex align-items-center gap-2">
+                                <span
+                                    class="p-badge text-xs"
+                                    [ngClass]="getPoolHealthBadgeClass(info.poolHealthScore)"
+                                    [pTooltip]="'EWMA RTT: ' + (info.poolRttEwmaMs | number:'1.1-1') + ' ms | Stale: ' + (info.poolStaleRatePct | number:'1.1-2') + '% | Failovers: ' + info.smartFailoverCount"
+                                    tooltipPosition="top">
+                                    {{ info.poolHealthScore | number:'1.0-0' }}/100
+                                </span>
+                                <span class="text-500 text-sm" *ngIf="info.poolRttEwmaMs > 0">
+                                    EWMA {{ info.poolRttEwmaMs | number:'1.0-0' }} ms
+                                </span>
+                            </div>
+                        </div>
+                        <div class="flex flex-nowrap">
+                            <div class="col-fixed-width text-500">
+                                <tooltip-text-icon
+                                    text="Stale"
+                                    tooltip="Rolling stale share rejection rate and count of locally suppressed expired shares dropped before wasted network submission."
+                                />
+                            </div>
+                            <div>
+                                {{ info.poolStaleRatePct | number:'1.1-2' }}%
+                                <span class="text-500 text-sm" *ngIf="info.staleSharesSuppressed > 0">
+                                    ({{ info.staleSharesSuppressed }} suppressed)
+                                </span>
+                            </div>
+                        </div>
                     </div>
                 </ng-container>
             </div>

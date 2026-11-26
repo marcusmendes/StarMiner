@@ -240,6 +240,12 @@ components:
         - coinDecimals
         - coinBlockTimeSeconds
         - coinUserIsAddress
+        - stratumSmartFailover
+        - poolHealthScore
+        - poolRttEwmaMs
+        - poolStaleRatePct
+        - staleSharesSuppressed
+        - smartFailoverCount
       properties:
         ASICModel:
           type: string
@@ -649,6 +655,24 @@ components:
         coinUserIsAddress:
           type: integer
           description: Whether the active stratumUser is a valid native payout address (0=no, 1=yes)
+        stratumSmartFailover:
+          type: boolean
+          description: Whether opt-in smart failover to fallback pool on sustained degradation is enabled
+        poolHealthScore:
+          type: number
+          description: Rolling coin-normalized pool health score (0-100)
+        poolRttEwmaMs:
+          type: number
+          description: Exponentially weighted moving average share response latency in milliseconds
+        poolStaleRatePct:
+          type: number
+          description: Rolling stale share rejection percentage over recent share window
+        staleSharesSuppressed:
+          type: integer
+          description: Number of ordinary expired shares dropped locally after clean_jobs epoch change
+        smartFailoverCount:
+          type: integer
+          description: Number of smart pool failovers triggered in the current session
 
     SystemASIC:
       type: object
@@ -785,6 +809,11 @@ components:
           description: Fallback stratum server URL used when primary is unavailable
           examples:
             - "stratum+tcp://backup.example.com"
+        stratumSmartFailover:
+          type: boolean
+          description: Opt-in automatic failover to fallback pool when primary health degrades below threshold
+          examples:
+            - false
         stratumCoinProfile:
           type: integer
           description: Primary stratum coin profile (0=Auto, 1=BTC, 2=DGB, 3=BCH, 4=BSV, 5=FB, 6=BC2, 7=XEC, 8=PPC, 9=NMC, 10=Generic SHA-256)

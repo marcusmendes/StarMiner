@@ -1083,6 +1083,17 @@ export class HomeComponent implements OnInit, OnDestroy {
     }
   }
 
+  public getPoolHealthBadgeClass(score?: number): string {
+    const val = score ?? 100;
+    if (val >= 80) {
+      return 'p-badge-success';
+    }
+    if (val >= 50) {
+      return 'p-badge-warning';
+    }
+    return 'p-badge-danger';
+  }
+
   public handleSystemMessages(info: ISystemInfo, systemInfoError: ISystemInfoError) {
     const updateMessage = (
       condition: boolean,

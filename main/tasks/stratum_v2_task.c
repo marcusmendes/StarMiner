@@ -18,6 +18,8 @@
 #include "libbase58.h"
 #include "device_config.h"
 #include "coinbase_decoder.h"
+#include "coin_params.h"
+#include "pool_score.h"
 #include "esp_heap_caps.h"
 #include "esp_psram.h"
 
@@ -198,8 +200,15 @@ static void stratum_v2_enqueue_job(GlobalState *GLOBAL_STATE, sv2_conn_t *conn,
 
     SYSTEM_notify_new_ntime(GLOBAL_STATE, ntime);
 
+    pthread_mutex_lock(&GLOBAL_STATE->valid_jobs_lock);
+    if (clean_jobs) {
+        GLOBAL_STATE->job_epoch++;
+    }
+    job->job_epoch = GLOBAL_STATE->job_epoch;
+    pthread_mutex_unlock(&GLOBAL_STATE->valid_jobs_lock);
+
     if (clean_jobs && (GLOBAL_STATE->stratum_queue.count > 0)) {
-        SYSTEM_clean_jobs_queue(GLOBAL_STATE);
+        queue_clear(&GLOBAL_STATE->stratum_queue);
     }
 
     if (GLOBAL_STATE->stratum_queue.count == QUEUE_SIZE) {
@@ -218,8 +227,15 @@ static void stratum_v2_enqueue_ext_job(GlobalState *GLOBAL_STATE, sv2_conn_t *co
 
     SYSTEM_notify_new_ntime(GLOBAL_STATE, job->ntime);
 
+    pthread_mutex_lock(&GLOBAL_STATE->valid_jobs_lock);
+    if (job->clean_jobs) {
+        GLOBAL_STATE->job_epoch++;
+    }
+    job->job_epoch = GLOBAL_STATE->job_epoch;
+    pthread_mutex_unlock(&GLOBAL_STATE->valid_jobs_lock);
+
     if (job->clean_jobs && (GLOBAL_STATE->stratum_queue.count > 0)) {
-        SYSTEM_clean_jobs_queue(GLOBAL_STATE);
+        queue_clear(&GLOBAL_STATE->stratum_queue);
     }
 
     if (GLOBAL_STATE->stratum_queue.count == QUEUE_SIZE) {
@@ -507,6 +523,10 @@ static void stratum_v2_handle_set_new_prev_hash(GlobalState *GLOBAL_STATE, sv2_c
 
     bool first_prev_hash = !conn->has_prev_hash;
 
+    pthread_mutex_lock(&GLOBAL_STATE->valid_jobs_lock);
+    GLOBAL_STATE->job_epoch++;
+    pthread_mutex_unlock(&GLOBAL_STATE->valid_jobs_lock);
+
     memcpy(conn->prev_hash, prev_hash, 32);
     conn->prev_hash_ntime = min_ntime;
     conn->prev_hash_nbits = nbits;
@@ -718,7 +738,20 @@ void stratum_v2_task(void *pvParameters)
         ESP_LOGI(TAG, "TCP connected to %s:%d (%s)", stratum_url, port, conn_info.host_ip);
 
         GLOBAL_STATE->transport = transport;
-        stratum_socket_set_options(transport);
+        CoinParams active_coin;
+        bool user_is_addr = false;
+        CoinProfileId active_profile = (CoinProfileId)(use_fallback
+            ? GLOBAL_STATE->SYSTEM_MODULE.fallback_pool_coin_profile
+            : GLOBAL_STATE->SYSTEM_MODULE.pool_coin_profile);
+        const char *active_user = use_fallback ? GLOBAL_STATE->SYSTEM_MODULE.fallback_pool_user : GLOBAL_STATE->SYSTEM_MODULE.pool_user;
+        coin_resolve_params(active_profile, active_user, stratum_url, &active_coin, &user_is_addr);
+        GLOBAL_STATE->coin_block_time_s = active_coin.block_time_s;
+        GLOBAL_STATE->coin_decimals = active_coin.decimals;
+        GLOBAL_STATE->coin_user_is_address = user_is_addr;
+        strncpy(GLOBAL_STATE->coin_ticker, active_coin.ticker, COIN_TICKER_MAX_LEN - 1);
+        GLOBAL_STATE->coin_ticker[COIN_TICKER_MAX_LEN - 1] = '\0';
+
+        stratum_socket_set_options_for_coin(transport, GLOBAL_STATE->coin_block_time_s);
 
         // Reset connection state
         memset(conn, 0, sizeof(*conn));
@@ -959,6 +992,16 @@ void stratum_v2_task(void *pvParameters)
             if (sv2_noise_recv(noise_ctx, transport, hdr_buf, recv_buf,
                                SV2_MAX_FRAME_SIZE, &payload_len) != 0) {
                 ESP_LOGE(TAG, "Failed to receive frame, reconnecting...");
+                if (!protocol_coordinator_v2_should_shutdown()) {
+                    int64_t now_us = esp_timer_get_time();
+                    pthread_mutex_lock(&GLOBAL_STATE->pool_score_lock);
+                    pool_score_record_disconnect(&GLOBAL_STATE->pool_score, GLOBAL_STATE->coin_block_time_s, now_us);
+                    bool should_failover = pool_score_should_failover(&GLOBAL_STATE->pool_score, now_us);
+                    pthread_mutex_unlock(&GLOBAL_STATE->pool_score_lock);
+                    if (should_failover) {
+                        protocol_coordinator_notify_degraded();
+                    }
+                }
                 retry_attempts++;
                 stratum_v2_close_connection(GLOBAL_STATE);
                 break;
@@ -990,19 +1033,30 @@ void stratum_v2_task(void *pvParameters)
                         // most recent share in the ack, giving the cleanest available round trip.
                         // accepted_count is surfaced separately so the UI can flag batch acks,
                         // where the elapsed time also includes the pool's batching window.
+                        int64_t now_us = esp_timer_get_time();
                         int slot = last_sequence_number % SV2_SUBMIT_TIMING_SLOTS;
                         int64_t submit_time_us = stratum_v2_submit_time_us[slot];
+                        float rtt_ms = -1.0f;
                         if (submit_time_us > 0) {
-                            float response_time_ms = (float)(esp_timer_get_time() - submit_time_us) / 1000.0f;
-                            ESP_LOGI(TAG, "Shares accepted: %lu (%.1f ms)", accepted_count, response_time_ms);
-                            GLOBAL_STATE->SYSTEM_MODULE.response_time = response_time_ms;
+                            rtt_ms = (float)(now_us - submit_time_us) / 1000.0f;
+                            ESP_LOGI(TAG, "Shares accepted: %lu (%.1f ms)", accepted_count, rtt_ms);
+                            GLOBAL_STATE->SYSTEM_MODULE.response_time = rtt_ms;
                             GLOBAL_STATE->SYSTEM_MODULE.response_share_batch = (uint16_t)accepted_count;
                             stratum_v2_submit_time_us[slot] = 0;
                         } else {
                             ESP_LOGI(TAG, "Shares accepted: %lu", accepted_count);
                         }
+                        pthread_mutex_lock(&GLOBAL_STATE->pool_score_lock);
                         for (uint32_t i = 0; i < accepted_count; i++) {
                             SYSTEM_notify_accepted_share(GLOBAL_STATE);
+                            pool_score_record_share(&GLOBAL_STATE->pool_score, true, false,
+                                                    (i == 0) ? rtt_ms : -1.0f,
+                                                    GLOBAL_STATE->coin_block_time_s, now_us);
+                        }
+                        bool should_failover = pool_score_should_failover(&GLOBAL_STATE->pool_score, now_us);
+                        pthread_mutex_unlock(&GLOBAL_STATE->pool_score_lock);
+                        if (should_failover) {
+                            protocol_coordinator_notify_degraded();
                         }
                     }
                     break;
@@ -1014,8 +1068,25 @@ void stratum_v2_task(void *pvParameters)
                     if (sv2_parse_submit_shares_error(recv_buf, hdr.msg_length,
                                                       &channel_id, &seq_num,
                                                       error_code, sizeof(error_code)) == 0) {
+                        int64_t now_us = esp_timer_get_time();
+                        int slot = seq_num % SV2_SUBMIT_TIMING_SLOTS;
+                        int64_t submit_time_us = stratum_v2_submit_time_us[slot];
+                        float rtt_ms = -1.0f;
+                        if (submit_time_us > 0) {
+                            rtt_ms = (float)(now_us - submit_time_us) / 1000.0f;
+                            stratum_v2_submit_time_us[slot] = 0;
+                        }
                         ESP_LOGW(TAG, "Share rejected: %s", error_code);
                         SYSTEM_notify_rejected_share(GLOBAL_STATE, error_code);
+                        bool is_stale = pool_score_is_stale_error(error_code);
+                        pthread_mutex_lock(&GLOBAL_STATE->pool_score_lock);
+                        pool_score_record_share(&GLOBAL_STATE->pool_score, false, is_stale,
+                                                rtt_ms, GLOBAL_STATE->coin_block_time_s, now_us);
+                        bool should_failover = pool_score_should_failover(&GLOBAL_STATE->pool_score, now_us);
+                        pthread_mutex_unlock(&GLOBAL_STATE->pool_score_lock);
+                        if (should_failover) {
+                            protocol_coordinator_notify_degraded();
+                        }
                     }
                     break;
                 }

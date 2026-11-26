@@ -16,6 +16,8 @@
 #include <string.h>
 #include "utils.h"
 #include "coinbase_decoder.h"
+#include "coin_params.h"
+#include "pool_score.h"
 #include "nvs_config.h"
 #include <esp_heap_caps.h>
 #include "esp_transport_ssl.h"
@@ -284,7 +286,20 @@ void stratum_v1_task(void *pvParameters)
             continue;
         }
 
-        stratum_socket_set_options(GLOBAL_STATE->transport);
+        CoinParams active_coin;
+        bool user_is_addr = false;
+        CoinProfileId active_profile = (CoinProfileId)(use_fallback
+            ? GLOBAL_STATE->SYSTEM_MODULE.fallback_pool_coin_profile
+            : GLOBAL_STATE->SYSTEM_MODULE.pool_coin_profile);
+        const char *active_user = use_fallback ? GLOBAL_STATE->SYSTEM_MODULE.fallback_pool_user : GLOBAL_STATE->SYSTEM_MODULE.pool_user;
+        coin_resolve_params(active_profile, active_user, stratum_url, &active_coin, &user_is_addr);
+        GLOBAL_STATE->coin_block_time_s = active_coin.block_time_s;
+        GLOBAL_STATE->coin_decimals = active_coin.decimals;
+        GLOBAL_STATE->coin_user_is_address = user_is_addr;
+        strncpy(GLOBAL_STATE->coin_ticker, active_coin.ticker, COIN_TICKER_MAX_LEN - 1);
+        GLOBAL_STATE->coin_ticker[COIN_TICKER_MAX_LEN - 1] = '\0';
+
+        stratum_socket_set_options_for_coin(GLOBAL_STATE->transport, GLOBAL_STATE->coin_block_time_s);
 
         const char *protocol = (conn_info.addr_family == AF_INET6) ? "IPv6" : "IPv4";
         const char *tls_status;
@@ -318,6 +333,7 @@ void stratum_v1_task(void *pvParameters)
         //mining.authorize - ID: 3
         STRATUM_V1_authorize(GLOBAL_STATE->transport, authorize_message_id, username, password);
 
+        char last_prev_hash[65] = {0};
         while (1) {
             // Check if coordinator wants us to shut down
             if (protocol_coordinator_v1_should_shutdown()) {
@@ -330,6 +346,16 @@ void stratum_v1_task(void *pvParameters)
             char *line = STRATUM_V1_receive_jsonrpc_line(GLOBAL_STATE->transport);
             if (!line) {
                 ESP_LOGE(TAG, "Failed to receive JSON-RPC line, reconnecting...");
+                if (!protocol_coordinator_v1_should_shutdown()) {
+                    int64_t now_us = esp_timer_get_time();
+                    pthread_mutex_lock(&GLOBAL_STATE->pool_score_lock);
+                    pool_score_record_disconnect(&GLOBAL_STATE->pool_score, GLOBAL_STATE->coin_block_time_s, now_us);
+                    bool should_failover = pool_score_should_failover(&GLOBAL_STATE->pool_score, now_us);
+                    pthread_mutex_unlock(&GLOBAL_STATE->pool_score_lock);
+                    if (should_failover) {
+                        protocol_coordinator_notify_degraded();
+                    }
+                }
                 retry_attempts++;
                 stratum_v1_close_connection(GLOBAL_STATE);
                 break;
@@ -362,9 +388,30 @@ void stratum_v1_task(void *pvParameters)
                 case MINING_NOTIFY:
                     GLOBAL_STATE->SYSTEM_MODULE.work_received++;
                     SYSTEM_notify_new_ntime(GLOBAL_STATE, stratum_api_v1_message.mining_notification->ntime);
-                    if (stratum_api_v1_message.mining_notification->clean_jobs &&
-                        (GLOBAL_STATE->stratum_queue.count > 0)) {
-                        SYSTEM_clean_jobs_queue(GLOBAL_STATE);
+                    {
+                        bool clean_jobs = stratum_api_v1_message.mining_notification->clean_jobs;
+                        const char *prev_hash = stratum_api_v1_message.mining_notification->prev_block_hash;
+                        bool prev_changed = false;
+                        if (prev_hash != NULL && prev_hash[0] != '\0') {
+                            if (last_prev_hash[0] != '\0' && strcmp(last_prev_hash, prev_hash) != 0) {
+                                prev_changed = true;
+                            }
+                            strncpy(last_prev_hash, prev_hash, sizeof(last_prev_hash) - 1);
+                            last_prev_hash[sizeof(last_prev_hash) - 1] = '\0';
+                        }
+                        bool epoch_bump = clean_jobs || prev_changed;
+
+                        pthread_mutex_lock(&GLOBAL_STATE->valid_jobs_lock);
+                        if (epoch_bump) {
+                            GLOBAL_STATE->job_epoch++;
+                        }
+                        uint32_t epoch = GLOBAL_STATE->job_epoch;
+                        pthread_mutex_unlock(&GLOBAL_STATE->valid_jobs_lock);
+                        stratum_api_v1_message.mining_notification->job_epoch = epoch;
+
+                        if (epoch_bump && (GLOBAL_STATE->stratum_queue.count > 0)) {
+                            queue_clear(&GLOBAL_STATE->stratum_queue);
+                        }
                     }
                     if (GLOBAL_STATE->stratum_queue.count == QUEUE_SIZE) {
                         mining_notify *next_notify_json_str = (mining_notify *) queue_dequeue(&GLOBAL_STATE->stratum_queue);
@@ -422,6 +469,16 @@ void stratum_v1_task(void *pvParameters)
 
                 case CLIENT_RECONNECT:
                     ESP_LOGE(TAG, "Pool requested client reconnect...");
+                    {
+                        int64_t now_us = esp_timer_get_time();
+                        pthread_mutex_lock(&GLOBAL_STATE->pool_score_lock);
+                        pool_score_record_disconnect(&GLOBAL_STATE->pool_score, GLOBAL_STATE->coin_block_time_s, now_us);
+                        bool should_failover = pool_score_should_failover(&GLOBAL_STATE->pool_score, now_us);
+                        pthread_mutex_unlock(&GLOBAL_STATE->pool_score_lock);
+                        if (should_failover) {
+                            protocol_coordinator_notify_degraded();
+                        }
+                    }
                     stratum_v1_close_connection(GLOBAL_STATE);
                     reconnect_requested = true;
                     break;
@@ -435,7 +492,9 @@ void stratum_v1_task(void *pvParameters)
                     {
                         float response_time_ms = STRATUM_V1_get_response_time_ms(stratum_api_v1_message.message_id, receive_time_us);
                         if (response_time_ms >= 0) {
-                            if (stratum_api_v1_message.response_success) {
+                            bool accepted = stratum_api_v1_message.response_success;
+                            bool is_stale = false;
+                            if (accepted) {
                                 ESP_LOGI(TAG, "message result accepted");
                                 ESP_LOGI(TAG, "Stratum response time: %.1f ms", response_time_ms);
                                 GLOBAL_STATE->SYSTEM_MODULE.response_time = response_time_ms;
@@ -443,6 +502,16 @@ void stratum_v1_task(void *pvParameters)
                             } else {
                                 ESP_LOGW(TAG, "message result rejected: %s", stratum_api_v1_message.error_str);
                                 SYSTEM_notify_rejected_share(GLOBAL_STATE, stratum_api_v1_message.error_str);
+                                is_stale = pool_score_is_stale_error(stratum_api_v1_message.error_str);
+                            }
+                            pthread_mutex_lock(&GLOBAL_STATE->pool_score_lock);
+                            pool_score_record_share(&GLOBAL_STATE->pool_score, accepted, is_stale,
+                                                    response_time_ms, GLOBAL_STATE->coin_block_time_s,
+                                                    receive_time_us);
+                            bool should_failover = pool_score_should_failover(&GLOBAL_STATE->pool_score, receive_time_us);
+                            pthread_mutex_unlock(&GLOBAL_STATE->pool_score_lock);
+                            if (should_failover) {
+                                protocol_coordinator_notify_degraded();
                             }
                         } else {
                             // Reset retry attempts after successfully receiving data.

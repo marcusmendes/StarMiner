@@ -182,6 +182,15 @@ describe('HomeComponent', () => {
       expect(component.getDvfsProfileLabel(4)).toBe('Adaptive');
     });
 
+    it('should map pool health scores to expected severity badge classes', () => {
+      expect(component.getPoolHealthBadgeClass(95)).toBe('p-badge-success');
+      expect(component.getPoolHealthBadgeClass(80)).toBe('p-badge-success');
+      expect(component.getPoolHealthBadgeClass(65)).toBe('p-badge-warning');
+      expect(component.getPoolHealthBadgeClass(50)).toBe('p-badge-warning');
+      expect(component.getPoolHealthBadgeClass(44)).toBe('p-badge-danger');
+      expect(component.getPoolHealthBadgeClass(0)).toBe('p-badge-danger');
+    });
+
     it('should NOT emit NO_MINING_REWARD for DGB solo payout and should suppress payout warnings when coinUserIsAddress is 0 or SHA256', () => {
       component.handleSystemMessages(
         {

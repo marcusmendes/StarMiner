@@ -111,13 +111,21 @@
                                 <span class="text-500 cursor-pointer" pTooltip="Uptime: {{axe.uptimeSeconds | dateAgo}}" tooltipPosition="top">
                                     {{axe.uptimeSeconds | dateAgo: {intervals: 1} }}
                                 </span>
-                                <div class="mt-1 mb-2">
+                                <div class="mt-1 mb-2 flex flex-wrap gap-1">
                                     <span
                                         class="p-badge text-xs cursor-pointer"
                                         [ngClass]="getDvfsProfileBadgeClass(axe.dvfsProfile)"
                                         [pTooltip]="getLearnedBoundsTooltip(axe) || 'DVFS Profile'"
                                         tooltipPosition="top">
                                         {{getDvfsProfileLabel(axe.dvfsProfile)}}
+                                    </span>
+                                    <span
+                                        *ngIf="axe.poolHealthScore !== undefined && axe.poolHealthScore !== null"
+                                        class="p-badge text-xs cursor-pointer"
+                                        [ngClass]="getPoolHealthBadgeClass(axe.poolHealthScore)"
+                                        [pTooltip]="'Pool Health ' + (axe.poolHealthScore | number:'1.0-0') + '/100 | Stale ' + ((axe.poolStaleRatePct ?? 0) | number:'1.1-2') + '% | Suppressed ' + (axe.staleSharesSuppressed ?? 0)"
+                                        tooltipPosition="top">
+                                        Pool {{axe.poolHealthScore | number:'1.0-0'}}
                                     </span>
                                 </div>
                             </div>

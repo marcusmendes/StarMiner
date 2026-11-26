@@ -15,6 +15,7 @@
 #include "freertos/task.h"
 #include "scoreboard.h"
 #include "self_test.h"
+#include "pool_score.h"
 
 static const char *TAG = "asic_result";
 
@@ -48,8 +49,10 @@ void ASIC_result_task(void *pvParameters)
         char jobid_buf[128] = {0};
         char extranonce2_buf[65] = {0};
         bool valid = false;
+        uint32_t current_epoch = 0;
 
         pthread_mutex_lock(&GLOBAL_STATE->valid_jobs_lock);
+        current_epoch = GLOBAL_STATE->job_epoch;
         if (job_id < 128 &&
             GLOBAL_STATE->valid_jobs != NULL &&
             GLOBAL_STATE->ASIC_TASK_MODULE.active_jobs != NULL &&
@@ -85,7 +88,14 @@ void ASIC_result_task(void *pvParameters)
         uint32_t version_bits = asic_result->rolled_version ^ job_snapshot.version;
         if (nonce_diff >= job_snapshot.pool_diff)
         {
-            if (GLOBAL_STATE->stratum_protocol == STRATUM_PROTOCOL_V2) {
+            if (pool_score_should_suppress_stale(job_snapshot.job_epoch,
+                                                 current_epoch,
+                                                 nonce_diff,
+                                                 (double)GLOBAL_STATE->network_nonce_diff)) {
+                GLOBAL_STATE->stale_shares_suppressed++;
+                ESP_LOGD(TAG, "Suppressed stale share for job %s (epoch %" PRIu32 " != %" PRIu32 ", diff %.1f)",
+                         job_snapshot.jobid, job_snapshot.job_epoch, current_epoch, nonce_diff);
+            } else if (GLOBAL_STATE->stratum_protocol == STRATUM_PROTOCOL_V2) {
                 // SV2: submit with binary protocol
                 int ret;
                 uint32_t sv2_job_id = (uint32_t)strtoul(job_snapshot.jobid, NULL, 10);

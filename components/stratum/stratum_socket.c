@@ -137,7 +137,7 @@ esp_err_t stratum_socket_resolve(const char *hostname, uint16_t port, stratum_co
     return ESP_OK;
 }
 
-void stratum_socket_set_options(esp_transport_handle_t transport)
+void stratum_socket_set_options_for_coin(esp_transport_handle_t transport, uint32_t block_time_s)
 {
     int sock = esp_transport_get_socket(transport);
     if (sock < 0) {
@@ -145,9 +145,15 @@ void stratum_socket_set_options(esp_transport_handle_t transport)
         return;
     }
 
+    bool fast_coin = (block_time_s > 0 && block_time_s <= 60);
+    int rcvtimeo_s = fast_coin ? 60 : 180;
+    int keepidle = fast_coin ? 20 : 60;   // seconds before sending keepalive probes
+    int keepintvl = fast_coin ? 5 : 10;   // seconds between keepalive probes
+    int keepcnt = 3;                      // number of keepalive probes before dropping
+
     // Send and receive timeouts
-    struct timeval snd_timeout = { .tv_sec = 5, .tv_usec = 0 };
-    struct timeval rcv_timeout = { .tv_sec = 60 * 3, .tv_usec = 0 };
+    struct timeval snd_timeout = { .tv_sec = 15, .tv_usec = 0 };
+    struct timeval rcv_timeout = { .tv_sec = rcvtimeo_s, .tv_usec = 0 };
     if (setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &snd_timeout, sizeof(snd_timeout)) < 0) {
         ESP_LOGE(TAG, "Failed to set SO_SNDTIMEO");
     }
@@ -169,9 +175,6 @@ void stratum_socket_set_options(esp_transport_handle_t transport)
     if (setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE, &keepalive, sizeof(keepalive)) < 0) {
         ESP_LOGE(TAG, "Failed to set SO_KEEPALIVE");
     }
-    int keepidle = 60;  // seconds before sending keepalive probes
-    int keepintvl = 10; // seconds between keepalive probes
-    int keepcnt = 3;    // number of keepalive probes before dropping
     if (setsockopt(sock, IPPROTO_TCP, TCP_KEEPIDLE, &keepidle, sizeof(keepidle)) < 0) {
         ESP_LOGE(TAG, "Failed to set TCP_KEEPIDLE");
     }
@@ -181,4 +184,12 @@ void stratum_socket_set_options(esp_transport_handle_t transport)
     if (setsockopt(sock, IPPROTO_TCP, TCP_KEEPCNT, &keepcnt, sizeof(keepcnt)) < 0) {
         ESP_LOGE(TAG, "Failed to set TCP_KEEPCNT");
     }
+
+    ESP_LOGI(TAG, "Socket options set (block_time=%lus, rcvtimeo=%ds, keepidle=%ds, keepintvl=%ds)",
+             (unsigned long)block_time_s, rcvtimeo_s, keepidle, keepintvl);
+}
+
+void stratum_socket_set_options(esp_transport_handle_t transport)
+{
+    stratum_socket_set_options_for_coin(transport, 600);
 }

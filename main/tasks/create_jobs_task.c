@@ -169,6 +169,25 @@ void create_jobs_task(void *pvParameters)
                 timeout_ms = ASIC_get_asic_job_frequency_ms(GLOBAL_STATE);
                 continue;
             }
+
+            uint32_t work_epoch = 0;
+            if (current_work_protocol == STRATUM_PROTOCOL_V2) {
+                work_epoch = stratum_v2_is_extended_channel(GLOBAL_STATE)
+                    ? ((sv2_ext_job_t *)current_work)->job_epoch
+                    : ((sv2_job_t *)current_work)->job_epoch;
+            } else {
+                work_epoch = ((mining_notify *)current_work)->job_epoch;
+            }
+            pthread_mutex_lock(&GLOBAL_STATE->valid_jobs_lock);
+            uint32_t cur_epoch = GLOBAL_STATE->job_epoch;
+            pthread_mutex_unlock(&GLOBAL_STATE->valid_jobs_lock);
+            if (work_epoch != cur_epoch) {
+                ESP_LOGD(TAG, "Discarding stale current_work (epoch %" PRIu32 " != %" PRIu32 ")", work_epoch, cur_epoch);
+                free_work_item(GLOBAL_STATE, current_work, current_work_protocol);
+                current_work = NULL;
+                timeout_ms = ASIC_get_asic_job_frequency_ms(GLOBAL_STATE);
+                continue;
+            }
         }
 
         // Final protocol check before generating work — protocol may have switched
@@ -225,6 +244,7 @@ static void generate_work(GlobalState *GLOBAL_STATE, mining_notify *notification
     next_job->extranonce2 = strdup_psram(extranonce_2_str);
     next_job->jobid = strdup_psram(notification->job_id);
     next_job->version_mask = GLOBAL_STATE->version_mask;
+    next_job->job_epoch = notification->job_epoch;
     if (next_job->extranonce2 == NULL || next_job->jobid == NULL) {
         ESP_LOGE(TAG, "Failed to allocate memory for job metadata");
         free_bm_job(next_job);
@@ -307,6 +327,7 @@ static void generate_work_sv2(GlobalState *GLOBAL_STATE, sv2_job_t *sv2_job, dou
     next_job->jobid = strdup_psram(jobid_str);
     next_job->extranonce2 = strdup_psram(""); // unused in SV2 standard
     next_job->version_mask = version_mask;
+    next_job->job_epoch = sv2_job->job_epoch;
     if (next_job->jobid == NULL || next_job->extranonce2 == NULL) {
         ESP_LOGE(TAG, "Failed to allocate memory for SV2 job metadata");
         free_bm_job(next_job);
@@ -418,6 +439,7 @@ static void generate_work_sv2_ext(GlobalState *GLOBAL_STATE, sv2_ext_job_t *ext_
     bin2hex(extranonce_2, extranonce_2_len, en2_hex, sizeof(en2_hex));
     next_job->extranonce2 = strdup_psram(en2_hex);
     next_job->version_mask = version_mask;
+    next_job->job_epoch = ext_job->job_epoch;
     if (next_job->jobid == NULL || next_job->extranonce2 == NULL) {
         ESP_LOGE(TAG, "Failed to allocate memory for SV2 ext job metadata");
         free_bm_job(next_job);

@@ -6,6 +6,7 @@
 #include "freertos/queue.h"
 #include "esp_heap_caps.h"
 #include "esp_psram.h"
+#include <lwip/sockets.h>
 
 #include "protocol_coordinator.h"
 #include "stratum_v1_task.h"
@@ -13,6 +14,7 @@
 #include "connect.h"
 #include "system.h"
 #include "nvs_config.h"
+#include "pool_score.h"
 
 #include <string.h>
 
@@ -34,6 +36,7 @@ typedef enum {
     COORD_EVENT_PROTOCOL_SUCCESS,
     COORD_EVENT_V1_TASK_EXITED,
     COORD_EVENT_V2_TASK_EXITED,
+    COORD_EVENT_POOL_DEGRADED,
 } coordinator_event_t;
 
 #define TRANSPORT_TIMEOUT_MS 5000
@@ -56,6 +59,7 @@ static stratum_protocol_t s_primary_protocol;
 static stratum_protocol_t s_fallback_protocol;
 static stratum_protocol_t s_running_protocol;
 static bool s_heartbeat_enabled = false;
+static bool s_failover_was_smart = false;
 
 // Primary pool info (saved at startup for heartbeat probing)
 static const char *s_primary_url = NULL;
@@ -75,6 +79,7 @@ void protocol_coordinator_init(GlobalState *gs)
     s_v1_should_shutdown = false;
     s_v2_should_shutdown = false;
     s_heartbeat_enabled = false;
+    s_failover_was_smart = false;
     s_consecutive_pool_failures = 0;
 }
 
@@ -89,6 +94,14 @@ void protocol_coordinator_notify_failure(void)
 void protocol_coordinator_notify_success(void)
 {
     coordinator_event_t evt = COORD_EVENT_PROTOCOL_SUCCESS;
+    if (s_event_queue) {
+        xQueueSend(s_event_queue, &evt, 0);
+    }
+}
+
+void protocol_coordinator_notify_degraded(void)
+{
+    coordinator_event_t evt = COORD_EVENT_POOL_DEGRADED;
     if (s_event_queue) {
         xQueueSend(s_event_queue, &evt, 0);
     }
@@ -171,17 +184,31 @@ static void start_protocol_task(GlobalState *gs, stratum_protocol_t protocol)
     }
 }
 
+static void unblock_transport(GlobalState *gs)
+{
+    taskENTER_CRITICAL(&gs->stratum_mux);
+    esp_transport_handle_t t = gs->transport;
+    taskEXIT_CRITICAL(&gs->stratum_mux);
+
+    if (!t) {
+        return;
+    }
+
+    int sock = esp_transport_get_socket(t);
+    if (sock >= 0) {
+        shutdown(sock, SHUT_RDWR);
+    } else {
+        esp_transport_close(t);
+    }
+}
+
 // Tell the V1 task to shut down and wait for it to exit.
-// Only closes the transport socket to unblock V1's recv — does NOT destroy it.
-// The V1 task handles its own full cleanup (destroy, queue clear) on exit.
+// Unblocks V1's recv() cleanly via shutdown() so the task closes/cleans up itself.
 static void stop_v1_task(GlobalState *gs)
 {
     s_v1_should_shutdown = true;
 
-    // Close transport to unblock V1's blocked recv()
-    if (gs->transport) {
-        esp_transport_close(gs->transport);
-    }
+    unblock_transport(gs);
 
     coordinator_event_t evt;
     for (int i = 0; i < 100; i++) {
@@ -196,16 +223,12 @@ static void stop_v1_task(GlobalState *gs)
 }
 
 // Tell the V2 task to shut down and wait for it to exit.
-// Only closes the transport socket to unblock V2's recv — does NOT destroy it.
-// The V2 task handles its own full cleanup (destroy, noise ctx, queue clear) on exit.
+// Unblocks V2's recv() cleanly via shutdown() so the task closes/cleans up itself.
 static void stop_v2_task(GlobalState *gs)
 {
     s_v2_should_shutdown = true;
 
-    // Close transport to unblock V2's blocked recv()
-    if (gs->transport) {
-        esp_transport_close(gs->transport);
-    }
+    unblock_transport(gs);
 
     coordinator_event_t evt;
     for (int i = 0; i < 100; i++) {
@@ -265,14 +288,20 @@ static bool probe_pool_v1(GlobalState *gs, const char *url, uint16_t port,
     STRATUM_V1_subscribe(transport, send_uid++, gs->DEVICE_CONFIG.family.asic.name);
     STRATUM_V1_authorize(transport, send_uid++, user, pass);
 
-    char recv_buffer[BUFFER_SIZE];
-    memset(recv_buffer, 0, BUFFER_SIZE);
+    char *recv_buffer = calloc(1, BUFFER_SIZE);
+    if (!recv_buffer) {
+        esp_transport_close(transport);
+        esp_transport_destroy(transport);
+        return false;
+    }
     int bytes_received = esp_transport_read(transport, recv_buffer, BUFFER_SIZE - 1, TRANSPORT_TIMEOUT_MS);
 
     esp_transport_close(transport);
     esp_transport_destroy(transport);
 
-    return (bytes_received > 0 && strstr(recv_buffer, "mining.notify") != NULL);
+    bool ok = (bytes_received > 0 && strstr(recv_buffer, "mining.notify") != NULL);
+    free(recv_buffer);
+    return ok;
 }
 
 // Probe a pool using the appropriate protocol for it.
@@ -294,11 +323,16 @@ static bool probe_pool(GlobalState *gs, bool use_fallback)
 }
 
 // Switch from primary to fallback pool.
-// The failed task has already exited (it sent PROTOCOL_FAILED then deleted itself).
+// The failed task has already exited (or was stopped cleanly for smart failover).
 static void switch_to_fallback(GlobalState *gs)
 {
-    queue_clear(&gs->stratum_queue);
+    SYSTEM_clean_jobs_queue(gs);
     reset_share_stats(gs);
+
+    int64_t now_us = esp_timer_get_time();
+    pthread_mutex_lock(&gs->pool_score_lock);
+    pool_score_reset_for_pool(&gs->pool_score, now_us, s_failover_was_smart);
+    pthread_mutex_unlock(&gs->pool_score_lock);
 
     gs->SYSTEM_MODULE.is_using_fallback = true;
     gs->stratum_protocol = s_fallback_protocol;
@@ -322,13 +356,19 @@ static void switch_to_primary(GlobalState *gs)
 
     stop_running_task(gs);
 
-    queue_clear(&gs->stratum_queue);
+    SYSTEM_clean_jobs_queue(gs);
     reset_share_stats(gs);
+
+    int64_t now_us = esp_timer_get_time();
+    pthread_mutex_lock(&gs->pool_score_lock);
+    pool_score_reset_for_pool(&gs->pool_score, now_us, false);
+    pthread_mutex_unlock(&gs->pool_score_lock);
 
     gs->SYSTEM_MODULE.is_using_fallback = false;
     gs->stratum_protocol = s_primary_protocol;
     s_running_protocol = s_primary_protocol;
     s_state = COORD_STATE_RUNNING_PRIMARY;
+    s_failover_was_smart = false;
 
     start_protocol_task(gs, s_primary_protocol);
 
@@ -346,6 +386,16 @@ static void do_heartbeat_probe(GlobalState *gs)
 
     if (!wifi_is_connected()) {
         return;
+    }
+
+    if (s_failover_was_smart) {
+        pthread_mutex_lock(&gs->pool_score_lock);
+        bool in_cooldown = pool_score_in_cooldown(&gs->pool_score, esp_timer_get_time());
+        pthread_mutex_unlock(&gs->pool_score_lock);
+        if (in_cooldown) {
+            ESP_LOGD(TAG, "Heartbeat: smart failover cooldown active, skipping switch back");
+            return;
+        }
     }
 
     ESP_LOGD(TAG, "Heartbeat: probing primary pool %s:%d", s_primary_url, s_primary_port);
@@ -390,7 +440,15 @@ static void resume_on_pool(GlobalState *gs, bool use_fallback)
     s_state = use_fallback ? COORD_STATE_RUNNING_FALLBACK : COORD_STATE_RUNNING_PRIMARY;
 
     queue_clear(&gs->stratum_queue);
+    SYSTEM_clean_jobs_queue(gs);
     reset_share_stats(gs);
+    int64_t now_us = esp_timer_get_time();
+    pthread_mutex_lock(&gs->pool_score_lock);
+    pool_score_reset_for_pool(&gs->pool_score, now_us, false);
+    pthread_mutex_unlock(&gs->pool_score_lock);
+    if (!use_fallback) {
+        s_failover_was_smart = false;
+    }
 
     ESP_LOGI(TAG, "Pool recovery: %s pool reachable, resuming mining (%s)",
              use_fallback ? "fallback" : "primary",
@@ -458,11 +516,17 @@ static void handle_event(GlobalState *gs, coordinator_event_t evt)
             // Below threshold — try the other pool. This only fires when a
             // fallback exists (otherwise threshold=1 and we paused above).
             if (s_state == COORD_STATE_RUNNING_PRIMARY) {
+                s_failover_was_smart = false;
                 switch_to_fallback(gs);
             } else if (s_state == COORD_STATE_RUNNING_FALLBACK) {
                 ESP_LOGI(TAG, "Fallback failed, trying primary");
-                queue_clear(&gs->stratum_queue);
+                SYSTEM_clean_jobs_queue(gs);
                 reset_share_stats(gs);
+                int64_t now_us = esp_timer_get_time();
+                pthread_mutex_lock(&gs->pool_score_lock);
+                pool_score_reset_for_pool(&gs->pool_score, now_us, false);
+                pthread_mutex_unlock(&gs->pool_score_lock);
+                s_failover_was_smart = false;
                 gs->SYSTEM_MODULE.is_using_fallback = false;
                 gs->stratum_protocol = s_primary_protocol;
                 s_running_protocol = s_primary_protocol;
@@ -470,6 +534,45 @@ static void handle_event(GlobalState *gs, coordinator_event_t evt)
                 start_protocol_task(gs, s_primary_protocol);
                 s_heartbeat_enabled = false;
             }
+            break;
+        }
+
+        case COORD_EVENT_POOL_DEGRADED: {
+            bool smart_enabled = nvs_config_get_bool(NVS_CONFIG_STRATUM_SMART_FAILOVER);
+            gs->SYSTEM_MODULE.stratum_smart_failover = smart_enabled;
+            if (!smart_enabled) {
+                break;
+            }
+            if (s_state != COORD_STATE_RUNNING_PRIMARY ||
+                gs->SYSTEM_MODULE.use_fallback_stratum ||
+                !has_fallback_pool(gs)) {
+                break;
+            }
+
+            int64_t now_us = esp_timer_get_time();
+            pthread_mutex_lock(&gs->pool_score_lock);
+            bool trigger = pool_score_should_failover(&gs->pool_score, now_us);
+            float score_snap = gs->pool_score.score;
+            float rtt_snap = gs->pool_score.rtt_ewma_ms;
+            float stale_snap = gs->pool_score.stale_rate_pct;
+            pthread_mutex_unlock(&gs->pool_score_lock);
+
+            if (!trigger) {
+                break;
+            }
+
+            ESP_LOGW(TAG, "Primary pool degraded (score=%.1f, rtt=%.1f ms, stale=%.2f%%); probing fallback",
+                     score_snap, rtt_snap, stale_snap);
+            if (!probe_pool(gs, /*use_fallback=*/true)) {
+                ESP_LOGW(TAG, "Fallback pool unreachable during smart failover probe; staying on primary");
+                break;
+            }
+
+            ESP_LOGW(TAG, "Smart pool failover verified fallback; switching pools");
+            stop_running_task(gs);
+            s_failover_was_smart = true;
+            gs->smart_failover_count++;
+            switch_to_fallback(gs);
             break;
         }
 

@@ -5,6 +5,7 @@
 #include <stddef.h>
 #include <stdbool.h>
 #include "esp_err.h"
+#include "coin_params.h"
 #include "stratum_api.h"
 
 #define MAX_ADDRESS_STRING_LEN 128
@@ -49,6 +50,13 @@ void coinbase_decode_address_from_scriptpubkey(const uint8_t *script, size_t scr
                                                 const char *bech32_hrp, bool is_testnet);
 
 /**
+ * @brief Decode coinbase output scriptPubKey using resolved multi-coin parameters
+ */
+void coinbase_decode_address_with_params(const uint8_t *script, size_t script_len,
+                                         char *output, size_t output_len,
+                                         const CoinParams *params);
+
+/**
  * @brief Structure representing a decoded coinbase transaction output
  */
 typedef struct {
@@ -71,7 +79,21 @@ typedef struct {
     bool decode_coinbase_tx;
     bool bip54_signaling;  // BIP-54: nLockTime = height - 1 && nSequence != 0xffffffff
     bool bip110_signaling; // BIP-110: signaling via version bit 4 (0x00000010)
+    CoinParams resolved_coin;
+    bool user_is_address;
 } mining_notification_result_t;
+
+/**
+ * @brief Process a mining notification with multi-coin pool URL and coin profile context
+ */
+esp_err_t coinbase_process_notification_ex(const mining_notify *notification,
+                                           const char *extranonce1,
+                                           int extranonce2_len,
+                                           const char *user_address,
+                                           const char *stratum_url,
+                                           CoinProfileId coin_profile,
+                                           bool decode_coinbase_tx,
+                                           mining_notification_result_t *result);
 
 /**
  * @brief Process a mining notification to extract all relevant data

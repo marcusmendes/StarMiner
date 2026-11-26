@@ -48,18 +48,63 @@ uint64_t coinbase_decode_varint(const uint8_t *data, int *offset) {
     }
 }
 
-void coinbase_decode_address_from_scriptpubkey(const uint8_t *script, size_t script_len, 
-                                                char *output, size_t output_len,
-                                                const char *bech32_hrp, bool is_testnet) {
-    if (script_len == 0 || output_len < 65) {
+static bool script_matches_user_payload(const uint8_t *script, size_t script_len, const CoinAddrPayload *payload)
+{
+    if (script == NULL || payload == NULL || payload->kind == COIN_ADDR_PAYLOAD_NONE) {
+        return false;
+    }
+
+    if (payload->kind == COIN_ADDR_PAYLOAD_P2PKH_HASH160 && payload->data_len == 20 &&
+        script_len == 25 && script[0] == OP_DUP && script[1] == OP_HASH160 &&
+        script[2] == OP_PUSHDATA_20 && script[23] == OP_EQUALVERIFY && script[24] == OP_CHECKSIG) {
+        return memcmp(script + 3, payload->data, 20) == 0;
+    }
+
+    if (payload->kind == COIN_ADDR_PAYLOAD_P2SH_HASH160 && payload->data_len == 20 &&
+        script_len == 23 && script[0] == OP_HASH160 && script[1] == OP_PUSHDATA_20 && script[22] == OP_EQUAL) {
+        return memcmp(script + 2, payload->data, 20) == 0;
+    }
+
+    if (payload->kind == COIN_ADDR_PAYLOAD_WITNESS) {
+        if (payload->witness_ver == 0 && payload->data_len == 20 &&
+            script_len == 22 && script[0] == OP_0 && script[1] == OP_PUSHDATA_20) {
+            return memcmp(script + 2, payload->data, 20) == 0;
+        }
+        if (payload->witness_ver == 0 && payload->data_len == 32 &&
+            script_len == 34 && script[0] == OP_0 && script[1] == OP_PUSHDATA_32) {
+            return memcmp(script + 2, payload->data, 32) == 0;
+        }
+        if (payload->witness_ver == 1 && payload->data_len == 32 &&
+            script_len == 34 && script[0] == OP_1 && script[1] == OP_PUSHDATA_32) {
+            return memcmp(script + 2, payload->data, 32) == 0;
+        }
+    }
+
+    return false;
+}
+
+void coinbase_decode_address_with_params(const uint8_t *script, size_t script_len,
+                                         char *output, size_t output_len,
+                                         const CoinParams *params) {
+    if (output == NULL || output_len == 0) {
+        return;
+    }
+    if (script == NULL || script_len == 0 || output_len < 65) {
         snprintf(output, output_len, "unknown");
         return;
     }
-    
+
     ensure_base58_init();
-    
-    uint8_t p2pkh_version = is_testnet ? 0x6F : 0x00;
-    uint8_t p2sh_version  = is_testnet ? 0xC4 : 0x05;
+
+    CoinParams fallback_btc;
+    if (params == NULL) {
+        coin_get_params_by_id(COIN_PROFILE_BTC, &fallback_btc);
+        params = &fallback_btc;
+    }
+
+    uint8_t p2pkh_version = params->p2pkh_version;
+    uint8_t p2sh_version  = params->p2sh_version;
+    const char *bech32_hrp = (params->has_bech32 && params->bech32_hrp[0] != '\0') ? params->bech32_hrp : NULL;
 
     // P2PKH: OP_DUP OP_HASH160 <20 bytes> OP_EQUALVERIFY OP_CHECKSIG
     if (script_len == 25 && script[0] == OP_DUP && script[1] == OP_HASH160 && 
@@ -88,10 +133,10 @@ void coinbase_decode_address_from_scriptpubkey(const uint8_t *script, size_t scr
     
     // P2WPKH: OP_0 <20 bytes>
     if (script_len == 22 && script[0] == OP_0 && script[1] == OP_PUSHDATA_20) {
-        if (segwit_addr_encode(output, bech32_hrp, 0, script + 2, 20)) {
+        if (bech32_hrp && segwit_addr_encode(output, bech32_hrp, 0, script + 2, 20)) {
             return;
         }
-        // Fallback to hex if encoding fails
+        // Fallback to hex if encoding fails or chain has no Bech32
         snprintf(output, output_len, "P2WPKH:");
         bin2hex(script + 2, 20, output + 7, output_len - 7);
         return;
@@ -99,10 +144,10 @@ void coinbase_decode_address_from_scriptpubkey(const uint8_t *script, size_t scr
     
     // P2WSH: OP_0 <32 bytes>
     if (script_len == 34 && script[0] == OP_0 && script[1] == OP_PUSHDATA_32) {
-        if (segwit_addr_encode(output, bech32_hrp, 0, script + 2, 32)) {
+        if (bech32_hrp && segwit_addr_encode(output, bech32_hrp, 0, script + 2, 32)) {
             return;
         }
-        // Fallback to hex if encoding fails
+        // Fallback to hex if encoding fails or chain has no Bech32
         snprintf(output, output_len, "P2WSH:");
         bin2hex(script + 2, 32, output + 6, output_len - 6);
         return;
@@ -110,10 +155,10 @@ void coinbase_decode_address_from_scriptpubkey(const uint8_t *script, size_t scr
     
     // P2TR: OP_1 <32 bytes>
     if (script_len == 34 && script[0] == OP_1 && script[1] == OP_PUSHDATA_32) {
-        if (segwit_addr_encode(output, bech32_hrp, 1, script + 2, 32)) {
+        if (bech32_hrp && segwit_addr_encode(output, bech32_hrp, 1, script + 2, 32)) {
             return;
         }
-        // Fallback to hex if encoding fails
+        // Fallback to hex if encoding fails or chain has no Bech32
         snprintf(output, output_len, "P2TR:");
         bin2hex(script + 2, 32, output + 5, output_len - 5);
         return;
@@ -145,12 +190,30 @@ void coinbase_decode_address_from_scriptpubkey(const uint8_t *script, size_t scr
     bin2hex(script, hex_len, output + 8, output_len - 8);
 }
 
-esp_err_t coinbase_process_notification(const mining_notify *notification,
-                                 const char *extranonce1,
-                                 int extranonce2_len,
-                                 const char *user_address,
-                                 bool decode_coinbase_tx,
-                                 mining_notification_result_t *result) {
+void coinbase_decode_address_from_scriptpubkey(const uint8_t *script, size_t script_len, 
+                                                char *output, size_t output_len,
+                                                const char *bech32_hrp, bool is_testnet) {
+    CoinParams params;
+    coin_get_params_by_id(COIN_PROFILE_BTC, &params);
+    if (is_testnet) {
+        params.p2pkh_version = 0x6F;
+        params.p2sh_version = 0xC4;
+    }
+    if (bech32_hrp != NULL && bech32_hrp[0] != '\0') {
+        params.has_bech32 = true;
+        snprintf(params.bech32_hrp, sizeof(params.bech32_hrp), "%s", bech32_hrp);
+    }
+    coinbase_decode_address_with_params(script, script_len, output, output_len, &params);
+}
+
+esp_err_t coinbase_process_notification_ex(const mining_notify *notification,
+                                           const char *extranonce1,
+                                           int extranonce2_len,
+                                           const char *user_address,
+                                           const char *stratum_url,
+                                           CoinProfileId coin_profile,
+                                           bool decode_coinbase_tx,
+                                           mining_notification_result_t *result) {
     if (!notification || !extranonce1 || !result) return ESP_ERR_INVALID_ARG;
 
     // Initialize result
@@ -158,21 +221,13 @@ esp_err_t coinbase_process_notification(const mining_notify *notification,
     result->user_value_satoshis = 0;
     result->decode_coinbase_tx = decode_coinbase_tx;
 
-    // Detect network from user address prefix for correct address encoding
-    const char *bech32_hrp = "bc";
-    bool is_testnet = false;
-    if (user_address) {
-        if (strncmp(user_address, "bcrt1", 4) == 0) {
-            bech32_hrp = "bcrt";
-            is_testnet = true;
-        } else if (strncmp(user_address, "tb1", 3) == 0) {
-            bech32_hrp = "tb";
-            is_testnet = true;
-        } else if (user_address[0] == 'm' || user_address[0] == 'n' || user_address[0] == '2') {
-            bech32_hrp = "tb";
-            is_testnet = true;
-        }
-    }
+    coin_resolve_params(coin_profile, user_address, stratum_url, &result->resolved_coin, &result->user_is_address);
+
+    char user_addr_part[MAX_ADDRESS_STRING_LEN];
+    coin_extract_address_part(user_address, user_addr_part, sizeof(user_addr_part));
+
+    CoinAddrPayload user_payload;
+    bool has_user_payload = coin_decode_user_address_payload(user_address, &result->resolved_coin, &user_payload);
 
     // 1. Calculate difficulty
     result->network_difficulty = networkDifficulty(notification->target);
@@ -199,8 +254,11 @@ esp_err_t coinbase_process_notification(const mining_notify *notification,
     hex2bin(notification->coinbase_1 + (coinbase_1_offset * 2), (uint8_t *)&result->block_height, block_height_len);
     coinbase_1_offset += block_height_len;
 
-    // Detect BIP-110 signaling: check if bit 4 (0x00000010) is set in version
-    result->bip110_signaling = decode_coinbase_tx && result->block_height < BIP110_SIGNAL_EXPIRY_BLOCK && (notification->version & (1U << BIP110_SIGNAL_BIT)) != 0;
+    // Detect BIP-110 signaling only on Bitcoin family chains
+    result->bip110_signaling = decode_coinbase_tx &&
+                               result->resolved_coin.is_btc_family &&
+                               result->block_height < BIP110_SIGNAL_EXPIRY_BLOCK &&
+                               (notification->version & (1U << BIP110_SIGNAL_BIT)) != 0;
 
     // Calculate remaining scriptsig length (excluding block height part)
     int scriptsig_length = scriptsig_len - 1 - block_height_len;
@@ -310,22 +368,25 @@ esp_err_t coinbase_process_notification(const mining_notify *notification,
         if (offset + script_len > coinbase_2_len) break;
 
         if (decode_coinbase_tx) {
-            if (value_satoshis > 0) {            
+            const uint8_t *script_ptr = coinbase_2_bin + offset;
+            if (value_satoshis > 0) {
                 char output_address[MAX_ADDRESS_STRING_LEN];
-                coinbase_decode_address_from_scriptpubkey(coinbase_2_bin + offset, script_len, output_address, MAX_ADDRESS_STRING_LEN, bech32_hrp, is_testnet);
-                bool is_user_address = strncmp(user_address, output_address, strlen(output_address)) == 0;
+                coinbase_decode_address_with_params(script_ptr, script_len, output_address, MAX_ADDRESS_STRING_LEN, &result->resolved_coin);
+                bool is_user_address = (user_addr_part[0] != '\0' && strcmp(user_addr_part, output_address) == 0) ||
+                                       (has_user_payload && script_matches_user_payload(script_ptr, script_len, &user_payload));
 
                 if (is_user_address) result->user_value_satoshis += value_satoshis;
 
                 if (i < MAX_COINBASE_TX_OUTPUTS) {
-                    strncpy(result->outputs[i].address, output_address, MAX_ADDRESS_STRING_LEN);
+                    strncpy(result->outputs[i].address, output_address, MAX_ADDRESS_STRING_LEN - 1);
+                    result->outputs[i].address[MAX_ADDRESS_STRING_LEN - 1] = '\0';
                     result->outputs[i].value_satoshis = value_satoshis;
                     result->outputs[i].is_user_output = is_user_address;
                     result->output_count++;
                 }
             } else {
                 if (i < MAX_COINBASE_TX_OUTPUTS) {
-                    coinbase_decode_address_from_scriptpubkey(coinbase_2_bin + offset, script_len, result->outputs[i].address, MAX_ADDRESS_STRING_LEN, bech32_hrp, is_testnet);
+                    coinbase_decode_address_with_params(script_ptr, script_len, result->outputs[i].address, MAX_ADDRESS_STRING_LEN, &result->resolved_coin);
                     result->outputs[i].value_satoshis = 0;
                     result->outputs[i].is_user_output = false;
                     result->output_count++;
@@ -344,9 +405,29 @@ esp_err_t coinbase_process_notification(const mining_notify *notification,
         }
     }
     
-    // Detect BIP-54 signaling: nLockTime = block_height - 1 AND nSequence != 0xffffffff
-    result->bip54_signaling = decode_coinbase_tx && (nLockTime == result->block_height - 1) && (nSequence != 0xffffffff);
+    // Detect BIP-54 signaling only on Bitcoin family chains
+    result->bip54_signaling = decode_coinbase_tx &&
+                              result->resolved_coin.is_btc_family &&
+                              (result->block_height > 0) &&
+                              (nLockTime == result->block_height - 1) &&
+                              (nSequence != 0xffffffff);
     
     free(coinbase_2_bin);
     return ESP_OK;
+}
+
+esp_err_t coinbase_process_notification(const mining_notify *notification,
+                                        const char *extranonce1,
+                                        int extranonce2_len,
+                                        const char *user_address,
+                                        bool decode_coinbase_tx,
+                                        mining_notification_result_t *result) {
+    return coinbase_process_notification_ex(notification,
+                                            extranonce1,
+                                            extranonce2_len,
+                                            user_address,
+                                            NULL,
+                                            COIN_PROFILE_AUTO,
+                                            decode_coinbase_tx,
+                                            result);
 }

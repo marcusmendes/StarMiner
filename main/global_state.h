@@ -84,6 +84,8 @@ typedef struct
     bool fallback_pool_extranonce_subscribe;
     bool pool_decode_coinbase_tx;
     bool fallback_pool_decode_coinbase_tx;
+    uint16_t pool_coin_profile;
+    uint16_t fallback_pool_coin_profile;
     float response_time;
     uint16_t response_share_batch;
     float process_time;
@@ -197,6 +199,11 @@ typedef struct
     char network_diff_string[DIFF_STRING_SIZE];
     char block_signals[MAX_BLOCK_SIGNALS][MAX_BLOCK_SIGNAL_LEN];
     int block_signals_count;
+
+    char coin_ticker[COIN_TICKER_MAX_LEN];
+    uint8_t coin_decimals;
+    uint16_t coin_block_time_s;
+    bool coin_user_is_address;
 } GlobalState;
 
 #endif /* GLOBAL_STATE_H_ */

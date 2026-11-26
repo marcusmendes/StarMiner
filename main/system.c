@@ -95,11 +95,30 @@ void SYSTEM_init_system(GlobalState * GLOBAL_STATE)
     module->pool_decode_coinbase_tx = nvs_config_get_bool(NVS_CONFIG_STRATUM_DECODE_COINBASE_TX);
     module->fallback_pool_decode_coinbase_tx = nvs_config_get_bool(NVS_CONFIG_FALLBACK_STRATUM_DECODE_COINBASE_TX);
 
+    // set the pool coin profiles
+    module->pool_coin_profile = nvs_config_get_u16(NVS_CONFIG_STRATUM_COIN_PROFILE);
+    module->fallback_pool_coin_profile = nvs_config_get_u16(NVS_CONFIG_FALLBACK_STRATUM_COIN_PROFILE);
+
     // use fallback stratum
     module->use_fallback_stratum = nvs_config_get_bool(NVS_CONFIG_USE_FALLBACK_STRATUM);
 
     // set based on config
     module->is_using_fallback = module->use_fallback_stratum;
+
+    // Resolve initial coin metadata from active pool before first block notification
+    CoinParams initial_coin;
+    bool initial_user_is_addr = false;
+    coin_resolve_params(
+        (CoinProfileId)(module->is_using_fallback ? module->fallback_pool_coin_profile : module->pool_coin_profile),
+        module->is_using_fallback ? module->fallback_pool_user : module->pool_user,
+        module->is_using_fallback ? module->fallback_pool_url : module->pool_url,
+        &initial_coin,
+        &initial_user_is_addr);
+    strncpy(GLOBAL_STATE->coin_ticker, initial_coin.ticker, COIN_TICKER_MAX_LEN - 1);
+    GLOBAL_STATE->coin_ticker[COIN_TICKER_MAX_LEN - 1] = '\0';
+    GLOBAL_STATE->coin_decimals = initial_coin.decimals;
+    GLOBAL_STATE->coin_block_time_s = initial_coin.block_time_s;
+    GLOBAL_STATE->coin_user_is_address = initial_user_is_addr;
 
     // load fallback pool protocol
     char *fb_proto_str = nvs_config_get_string(NVS_CONFIG_FALLBACK_STRATUM_PROTOCOL);

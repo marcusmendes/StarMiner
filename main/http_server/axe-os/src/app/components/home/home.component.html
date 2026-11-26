@@ -535,10 +535,10 @@
                     </div>
                     <div class="flex flex-nowrap justify-content-between" *ngIf="(info.coinbaseOutputs?.length ?? 0) > 0">
                         <div class="col-fixed-width text-500">
-                            <tooltip-text-icon text="Value" tooltip="Total value of transaction outputs in BTC. For non-bitcoin chains, disable 'Decode Coinbase Tx' in Advanced Pool Options." />
+                            <tooltip-text-icon text="Value" [tooltip]="'Total value of transaction outputs in ' + (info.coinTicker || 'BTC') + '. Configure coin profile or disable \'Decode Coinbase Tx\' in Advanced Pool Options.'" />
                         </div>
                         <ng-container *ngIf="info.coinbaseValueTotalSatoshis && info.coinbaseValueTotalSatoshis > 0">
-                            {{ info.coinbaseValueTotalSatoshis | sats }}
+                            {{ info.coinbaseValueTotalSatoshis | sats:(info.coinTicker || 'BTC'):(info.coinDecimals || 8) }}
                         </ng-container>
                     </div>
                     <div class="flex flex-nowrap align-items-baseline" *ngIf="(info.coinbaseOutputs?.length ?? 0) > 0">
@@ -548,12 +548,12 @@
                         <div class="w-full">
                             <div *ngFor="let output of info.coinbaseOutputs; let i = index" class="flex justify-content-between">
                                 @if (output.value > 0) {
-                                    @if (output.address === activePoolUserAddressPart) {
+                                    @if (output.isUserOutput || output.address === activePoolUserAddressPart) {
                                         <span><span class="text-monospace text-sm font-bold" pTooltip="Your payout address" tooltipPosition="top" sensitive-data>{{ output.address | address }}</span>&nbsp;<i class="pi pi-star-fill text-xs"></i></span>
                                     } @else {
                                         <span class="text-monospace text-sm" pTooltip="{{ output.address }}" tooltipPosition="top">{{ output.address | address }}</span>
                                     }
-                                    <span class="text-sm">{{ output.value | sats }}</span>
+                                    <span class="text-sm">{{ output.value | sats:(info.coinTicker || 'BTC'):(info.coinDecimals || 8) }}</span>
                                 } @else {
                                     <span class="text-monospace text-xs">{{ output.address }}</span>
                                 }
@@ -565,7 +565,7 @@
                             Amount
                         </div>
                         <ng-container *ngIf="info.coinbaseValueTotalSatoshis && info.coinbaseValueTotalSatoshis > 0">
-                            {{ info.coinbaseValueTotalSatoshis / 100_000_000 }}
+                            {{ info.coinbaseValueTotalSatoshis | sats:(info.coinTicker || 'BTC'):(info.coinDecimals || 8) }}
                         </ng-container>
                     </div>
                 </div>

@@ -102,6 +102,10 @@ static void system_api_add_telemetry(cJSON *root, GlobalState *g) {
     cJSON_AddNumberToObject(root, "preWatchdogRecoveries", g->POWER_MANAGEMENT_MODULE.pre_watchdog_recoveries);
     cJSON_AddFloatToObject(root, "adaptiveBestFreq", g->POWER_MANAGEMENT_MODULE.adaptive_best_freq_mhz);
     cJSON_AddNumberToObject(root, "adaptiveBestVcore", g->POWER_MANAGEMENT_MODULE.adaptive_best_vcore_mv);
+    cJSON_AddStringToObject(root, "coinTicker", g->coin_ticker[0] ? g->coin_ticker : "BTC");
+    cJSON_AddNumberToObject(root, "coinDecimals", g->coin_decimals > 0 ? g->coin_decimals : 8);
+    cJSON_AddNumberToObject(root, "coinBlockTimeSeconds", g->coin_block_time_s > 0 ? g->coin_block_time_s : 600);
+    cJSON_AddNumberToObject(root, "coinUserIsAddress", g->coin_user_is_address ? 1 : 0);
     cJSON_AddStringToObject(root, "wifiStatus", g->SYSTEM_MODULE.wifi_status);
 
     int8_t rssi = -90;
@@ -174,6 +178,7 @@ static void system_api_add_config(cJSON *root, GlobalState *g) {
     cJSON_AddStringToObject(root, "stratumCert", s_cert ? s_cert : "");
     free(s_cert);
     cJSON_AddBoolToObject(root, "stratumDecodeCoinbase", nvs_config_get_bool(NVS_CONFIG_STRATUM_DECODE_COINBASE_TX));
+    cJSON_AddNumberToObject(root, "stratumCoinProfile", nvs_config_get_u16(NVS_CONFIG_STRATUM_COIN_PROFILE));
 
     char *f_url = nvs_config_get_string(NVS_CONFIG_FALLBACK_STRATUM_URL);
     cJSON_AddStringToObject(root, "fallbackStratumURL", f_url ? f_url : "");
@@ -189,6 +194,7 @@ static void system_api_add_config(cJSON *root, GlobalState *g) {
     cJSON_AddStringToObject(root, "fallbackStratumCert", f_cert ? f_cert : "");
     free(f_cert);
     cJSON_AddBoolToObject(root, "fallbackStratumDecodeCoinbase", nvs_config_get_bool(NVS_CONFIG_FALLBACK_STRATUM_DECODE_COINBASE_TX));
+    cJSON_AddNumberToObject(root, "fallbackStratumCoinProfile", nvs_config_get_u16(NVS_CONFIG_FALLBACK_STRATUM_COIN_PROFILE));
 
     char *stratum_proto = nvs_config_get_string(NVS_CONFIG_STRATUM_PROTOCOL);
     cJSON_AddStringToObject(root, "stratumProtocol", stratum_proto ? stratum_proto : STRATUM_V1);
@@ -298,6 +304,7 @@ static void system_api_add_block_info(cJSON *root, GlobalState *g) {
             if (obj) {
                 cJSON_AddNumberToObject(obj, "value", g->coinbase_outputs[i].value_satoshis);
                 cJSON_AddStringToObject(obj, "address", g->coinbase_outputs[i].address);
+                cJSON_AddBoolToObject(obj, "isUserOutput", g->coinbase_outputs[i].is_user_output);
                 cJSON_AddItemToArray(outputs, obj);
             }
         }

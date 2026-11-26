@@ -181,5 +181,54 @@ describe('HomeComponent', () => {
       expect(component.getDvfsProfileLabel(3)).toBe('Performance');
       expect(component.getDvfsProfileLabel(4)).toBe('Adaptive');
     });
+
+    it('should NOT emit NO_MINING_REWARD for DGB solo payout and should suppress payout warnings when coinUserIsAddress is 0 or SHA256', () => {
+      component.handleSystemMessages(
+        {
+          ...baseSystemInfo,
+          coinTicker: 'DGB',
+          coinDecimals: 8,
+          coinUserIsAddress: 1,
+          coinbaseOutputs: [
+            { value: 24271173064, address: 'DJKYme7vLUcgDAJGqjXbcmqdRVWnH5xQnU', isUserOutput: true },
+            { value: 245163364, address: 'dgb1qvayz6xjf6l9suwz8pldya3s8jjj4ayqk9amhse', isUserOutput: false }
+          ],
+          coinbaseValueTotalSatoshis: 24516336428,
+          coinbaseValueUserSatoshis: 24271173064
+        },
+        { duration: 0, startTime: null }
+      );
+
+      expect(component.messages.find(m => m.type === 'NO_MINING_REWARD')).toBeUndefined();
+      expect(component.messages.find(m => m.type === 'NOT_SOLO_MINING')).toBeUndefined();
+
+      // Emit a NO_MINING_REWARD first, then confirm coinUserIsAddress=0 clears and suppresses it
+      component.handleSystemMessages(
+        {
+          ...baseSystemInfo,
+          coinTicker: 'BTC',
+          coinUserIsAddress: 1,
+          coinbaseOutputs: [{ value: 312500000, address: '1OtherAddress', isUserOutput: false }],
+          coinbaseValueTotalSatoshis: 312500000,
+          coinbaseValueUserSatoshis: 0
+        },
+        { duration: 0, startTime: null }
+      );
+      expect(component.messages.find(m => m.type === 'NO_MINING_REWARD')).toBeDefined();
+
+      component.handleSystemMessages(
+        {
+          ...baseSystemInfo,
+          coinTicker: 'SHA256',
+          coinUserIsAddress: 0,
+          coinbaseOutputs: [{ value: 312500000, address: '1OtherAddress', isUserOutput: false }],
+          coinbaseValueTotalSatoshis: 312500000,
+          coinbaseValueUserSatoshis: 0
+        },
+        { duration: 0, startTime: null }
+      );
+      expect(component.messages.find(m => m.type === 'NO_MINING_REWARD')).toBeUndefined();
+      expect(component.messages.find(m => m.type === 'NOT_SOLO_MINING')).toBeUndefined();
+    });
   });
 });

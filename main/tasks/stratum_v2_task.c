@@ -303,9 +303,19 @@ static void stratum_v2_decode_coinbase(GlobalState *GLOBAL_STATE, sv2_conn_t *co
 
     const char *user = use_fallback ? GLOBAL_STATE->SYSTEM_MODULE.fallback_pool_user
                                     : GLOBAL_STATE->SYSTEM_MODULE.pool_user;
+    const char *stratum_url = use_fallback ? GLOBAL_STATE->SYSTEM_MODULE.fallback_pool_url
+                                           : GLOBAL_STATE->SYSTEM_MODULE.pool_url;
+    CoinProfileId coin_profile = (CoinProfileId)(use_fallback ? nvs_config_get_u16(NVS_CONFIG_FALLBACK_STRATUM_COIN_PROFILE)
+                                                              : nvs_config_get_u16(NVS_CONFIG_STRATUM_COIN_PROFILE));
+    if (use_fallback) {
+        GLOBAL_STATE->SYSTEM_MODULE.fallback_pool_coin_profile = (uint16_t)coin_profile;
+    } else {
+        GLOBAL_STATE->SYSTEM_MODULE.pool_coin_profile = (uint16_t)coin_profile;
+    }
 
-    esp_err_t err = coinbase_process_notification(&notify, extranonce1_hex, extranonce2_len,
-                                                   user, decode_coinbase, result);
+    esp_err_t err = coinbase_process_notification_ex(&notify, extranonce1_hex, extranonce2_len,
+                                                      user, stratum_url, coin_profile,
+                                                      decode_coinbase, result);
     free(coinbase_1_hex);
     free(coinbase_2_hex);
     free(extranonce1_hex);
@@ -322,6 +332,26 @@ static void stratum_v2_decode_coinbase(GlobalState *GLOBAL_STATE, sv2_conn_t *co
                  conn->extranonce_prefix_len, conn->extranonce_size, prefix_hex);
         free(result);
         return;
+    }
+
+    strncpy(GLOBAL_STATE->coin_ticker, result->resolved_coin.ticker, COIN_TICKER_MAX_LEN - 1);
+    GLOBAL_STATE->coin_ticker[COIN_TICKER_MAX_LEN - 1] = '\0';
+    GLOBAL_STATE->coin_decimals = result->resolved_coin.decimals;
+    GLOBAL_STATE->coin_block_time_s = result->resolved_coin.block_time_s;
+    GLOBAL_STATE->coin_user_is_address = result->user_is_address;
+
+    GLOBAL_STATE->block_signals_count = 0;
+    if (result->resolved_coin.is_btc_family) {
+        if (result->bip54_signaling) {
+            strncpy(GLOBAL_STATE->block_signals[GLOBAL_STATE->block_signals_count], "BIP-54", MAX_BLOCK_SIGNAL_LEN - 1);
+            GLOBAL_STATE->block_signals[GLOBAL_STATE->block_signals_count][MAX_BLOCK_SIGNAL_LEN - 1] = '\0';
+            GLOBAL_STATE->block_signals_count++;
+        }
+        if (result->bip110_signaling) {
+            strncpy(GLOBAL_STATE->block_signals[GLOBAL_STATE->block_signals_count], "BIP-110", MAX_BLOCK_SIGNAL_LEN - 1);
+            GLOBAL_STATE->block_signals[GLOBAL_STATE->block_signals_count][MAX_BLOCK_SIGNAL_LEN - 1] = '\0';
+            GLOBAL_STATE->block_signals_count++;
+        }
     }
 
     if (result->block_height != 0 && (uint32_t)GLOBAL_STATE->block_height != result->block_height) {

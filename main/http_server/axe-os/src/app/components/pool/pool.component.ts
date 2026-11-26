@@ -24,6 +24,11 @@ interface IChannelOption {
   label: string;
 }
 
+interface ICoinProfileOption {
+  value: number;
+  label: string;
+}
+
 @Component({
   selector: 'app-pool',
   templateUrl: './pool.component.html',
@@ -53,6 +58,20 @@ export class PoolComponent implements OnInit {
   public sv2ChannelOptions: IChannelOption[] = [
     { value: 'extended', label: 'Extended Channels' },
     { value: 'standard', label: 'Standard Channels' }
+  ];
+
+  public coinProfileOptions: ICoinProfileOption[] = [
+    { value: 0, label: 'Auto (Detect from Address / Pool)' },
+    { value: 1, label: 'Bitcoin (BTC)' },
+    { value: 2, label: 'DigiByte (DGB)' },
+    { value: 3, label: 'Bitcoin Cash (BCH)' },
+    { value: 4, label: 'Bitcoin SV (BSV)' },
+    { value: 5, label: 'Fractal Bitcoin (FB)' },
+    { value: 6, label: 'Bitcoin II (BC2)' },
+    { value: 7, label: 'eCash (XEC)' },
+    { value: 8, label: 'Peercoin (PPC)' },
+    { value: 9, label: 'Namecoin (NMC)' },
+    { value: 10, label: 'Generic SHA-256' }
   ];
 
   public asicModel: string = '';
@@ -92,6 +111,7 @@ export class PoolComponent implements OnInit {
           stratumTLS: [info.stratumTLS || 0],
           stratumCert: [info.stratumCert],
           stratumDecodeCoinbase: [info.stratumDecodeCoinbase == true, [Validators.required]],
+          stratumCoinProfile: [info.stratumCoinProfile ?? 0, [Validators.min(0), Validators.max(10)]],
           fallbackStratumURL: [info.fallbackStratumURL, [
             Validators.pattern(/^(?!.*stratum\+tcp:\/\/)(?!.*:[1-9]\d{0,4}$).*$/),
           ]],
@@ -106,6 +126,7 @@ export class PoolComponent implements OnInit {
           fallbackStratumTLS: [info.fallbackStratumTLS || 0],
           fallbackStratumCert: [info.fallbackStratumCert],
           fallbackStratumDecodeCoinbase: [info.fallbackStratumDecodeCoinbase == true, [Validators.required]],
+          fallbackStratumCoinProfile: [info.fallbackStratumCoinProfile ?? 0, [Validators.min(0), Validators.max(10)]],
           fallbackStratumUser: [info.fallbackStratumUser, [Validators.required]],
           fallbackStratumPassword: ['*****', [Validators.required]],
           fallbackStratumProtocol: [info.fallbackStratumProtocol || 'SV1'],

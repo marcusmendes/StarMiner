@@ -145,6 +145,7 @@ components:
         - fallbackStratumTLS
         - fallbackStratumCert
         - fallbackStratumDecodeCoinbase
+        - fallbackStratumCoinProfile
         - fanrpm
         - fan2rpm
         - fanspeed
@@ -199,6 +200,7 @@ components:
         - stratumTLS
         - stratumCert
         - stratumDecodeCoinbase
+        - stratumCoinProfile
         - temp
         - temp2
         - uptimeSeconds
@@ -234,6 +236,10 @@ components:
         - preWatchdogRecoveries
         - adaptiveBestFreq
         - adaptiveBestVcore
+        - coinTicker
+        - coinDecimals
+        - coinBlockTimeSeconds
+        - coinUserIsAddress
       properties:
         ASICModel:
           type: string
@@ -289,6 +295,11 @@ components:
         fallbackStratumDecodeCoinbase:
           type: boolean
           description: Enable fallback pool coinbase transaction decoding
+        fallbackStratumCoinProfile:
+          type: integer
+          minimum: 0
+          maximum: 10
+          description: Fallback stratum coin profile (0=Auto, 1=BTC, 2=DGB, 3=BCH, 4=BSV, 5=FB, 6=BC2, 7=XEC, 8=PPC, 9=NMC, 10=Generic SHA-256)
         fallbackStratumProtocol:
           type: string
           enum: [SV1, SV2]
@@ -484,6 +495,11 @@ components:
         stratumDecodeCoinbase:
           type: boolean
           description: Enable primary pool coinbase transaction decoding
+        stratumCoinProfile:
+          type: integer
+          minimum: 0
+          maximum: 10
+          description: Primary stratum coin profile (0=Auto, 1=BTC, 2=DGB, 3=BCH, 4=BSV, 5=FB, 6=BC2, 7=XEC, 8=PPC, 9=NMC, 10=Generic SHA-256)
         temp:
           type: number
           description: Average chip temperature
@@ -553,6 +569,9 @@ components:
               address:
                 type: string
                 description: Output address
+              isUserOutput:
+                type: boolean
+                description: Whether this coinbase output belongs to the configured user payout address
         coinbaseValueTotalSatoshis:
           type: integer
           description: Total value of coinbase transaction in satoshis
@@ -618,6 +637,18 @@ components:
         adaptiveBestVcore:
           type: integer
           description: Proven safe adaptive DVFS core voltage in mV (0=not yet locked)
+        coinTicker:
+          type: string
+          description: Active coin ticker symbol (e.g. BTC, DGB, XEC, SHA256)
+        coinDecimals:
+          type: integer
+          description: Number of decimal places for base unit formatting (e.g. 8 for BTC/DGB, 2 for XEC)
+        coinBlockTimeSeconds:
+          type: integer
+          description: Target block interval in seconds for active coin (e.g. 600 for BTC, 15 for DGB)
+        coinUserIsAddress:
+          type: integer
+          description: Whether the active stratumUser is a valid native payout address (0=no, 1=yes)
 
     SystemASIC:
       type: object
@@ -754,6 +785,20 @@ components:
           description: Fallback stratum server URL used when primary is unavailable
           examples:
             - "stratum+tcp://backup.example.com"
+        stratumCoinProfile:
+          type: integer
+          description: Primary stratum coin profile (0=Auto, 1=BTC, 2=DGB, 3=BCH, 4=BSV, 5=FB, 6=BC2, 7=XEC, 8=PPC, 9=NMC, 10=Generic SHA-256)
+          minimum: 0
+          maximum: 10
+          examples:
+            - 0
+        fallbackStratumCoinProfile:
+          type: integer
+          description: Fallback stratum coin profile (0=Auto, 1=BTC, 2=DGB, 3=BCH, 4=BSV, 5=FB, 6=BC2, 7=XEC, 8=PPC, 9=NMC, 10=Generic SHA-256)
+          minimum: 0
+          maximum: 10
+          examples:
+            - 0
         stratumUser:
           type: string
           description: Username for primary stratum server

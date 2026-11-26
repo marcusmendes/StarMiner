@@ -5,6 +5,7 @@ SRCS
     "stratum_api.c"
     "stratum_socket.c"
     "coinbase_decoder.c"
+    "coin_params.c"
     "segwit_addr.c"
     "base58.c"
 

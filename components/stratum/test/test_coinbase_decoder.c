@@ -276,3 +276,144 @@ TEST_CASE("BIP-110 signaling expired", "[coinbase_decoder]")
     TEST_ASSERT_EQUAL(965664, result.block_height);
     TEST_ASSERT_FALSE(result.bip110_signaling);
 }
+
+TEST_CASE("Multi-coin registry and auto-detection resolve DGB, PPC, NMC, XEC, BTC, and Generic", "[coinbase_decoder]")
+{
+    CoinParams params = {0};
+    bool user_is_addr = false;
+
+    // 1. DGB P2PKH with .worker suffix
+    coin_resolve_params(COIN_PROFILE_AUTO, "DJKYme7vLUcgDAJGqjXbcmqdRVWnH5xQnU.Bitaxe01", "lat-dgb.solofury.com", &params, &user_is_addr);
+    TEST_ASSERT_EQUAL(COIN_PROFILE_DGB, params.id);
+    TEST_ASSERT_EQUAL_STRING("DGB", params.ticker);
+    TEST_ASSERT_EQUAL_UINT8(8, params.decimals);
+    TEST_ASSERT_EQUAL_UINT16(15, params.block_time_s);
+    TEST_ASSERT_EQUAL_HEX8(0x1E, params.p2pkh_version);
+    TEST_ASSERT_EQUAL_HEX8(0x3F, params.p2sh_version);
+    TEST_ASSERT_EQUAL_STRING("dgb", params.bech32_hrp);
+    TEST_ASSERT_FALSE(params.is_btc_family);
+    TEST_ASSERT_TRUE(user_is_addr);
+
+    // 2. DGB Bech32
+    coin_resolve_params(COIN_PROFILE_AUTO, "dgb1q42aueh0wluqpzg3ng32kvaugnx4thnxafl7jvg", "solo.digibyte.org", &params, &user_is_addr);
+    TEST_ASSERT_EQUAL(COIN_PROFILE_DGB, params.id);
+    TEST_ASSERT_EQUAL_STRING("DGB", params.ticker);
+    TEST_ASSERT_TRUE(user_is_addr);
+
+    // 3. PPC & NMC Base58 versions
+    coin_resolve_params(COIN_PROFILE_AUTO, "PAdonateF5tG3mW8N2Q9p6sV4L9wK1Z3bX", "ppc.pool.example", &params, &user_is_addr);
+    TEST_ASSERT_EQUAL(COIN_PROFILE_PPC, params.id);
+    TEST_ASSERT_EQUAL_STRING("PPC", params.ticker);
+    TEST_ASSERT_FALSE(user_is_addr); // synthetic invalid checksum triggers URL hint instead
+
+    coin_resolve_params(COIN_PROFILE_AUTO, "NMcAccount.01", "nmc.pool.example", &params, &user_is_addr);
+    TEST_ASSERT_EQUAL(COIN_PROFILE_NMC, params.id);
+    TEST_ASSERT_EQUAL_STRING("NMC", params.ticker);
+    TEST_ASSERT_FALSE(user_is_addr);
+
+    // 4. Explicit override beats URL hint
+    coin_resolve_params(COIN_PROFILE_XEC, "1DYwPTnC4NgEmoqbLbcRqoSzVeH3ehmGbV.rig1", "btc.pool.example", &params, &user_is_addr);
+    TEST_ASSERT_EQUAL(COIN_PROFILE_XEC, params.id);
+    TEST_ASSERT_EQUAL_STRING("XEC", params.ticker);
+    TEST_ASSERT_EQUAL_UINT8(2, params.decimals);
+    TEST_ASSERT_TRUE(user_is_addr);
+
+    // 5. Generic fallback for non-address pool username
+    coin_resolve_params(COIN_PROFILE_AUTO, "alice.rig1", "stratum.unknownpool.org", &params, &user_is_addr);
+    TEST_ASSERT_EQUAL(COIN_PROFILE_GENERIC, params.id);
+    TEST_ASSERT_EQUAL_STRING("SHA256", params.ticker);
+    TEST_ASSERT_FALSE(user_is_addr);
+}
+
+TEST_CASE("DGB solo coinbase decodes native addresses and matches user payout", "[coinbase_decoder]")
+{
+    // Output 0: 99,000,000,000 sats (990 DGB) = 0x170cdc1e00 -> LE: 001edc0c17000000
+    // Output 1:  1,000,000,000 sats (10 DGB) = 0x3b9aca00 -> LE: 00ca9a3b00000000
+    mining_notify notify = { 0 };
+    notify.version = 0x20000010;
+    notify.job_id = "dgb_job";
+    notify.coinbase_1 = "01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff0b02a502736f6c6f646762";
+    // coinbase_2: nSequence(feffffff) + num_outputs(02) +
+    // out0: 001edc0c17000000 + len(19) + 76a914 9093b0ed1d457129f65dff4c4d3669c8c8b8acfe 88ac +
+    // out1: 00ca9a3b00000000 + len(16) + 0014 aabbccddeeff00112233445566778899aabbccdd +
+    // nLockTime(a4020000 = 676 = height - 1)
+    notify.coinbase_2 = "feffffff02"
+                        "001edc0c170000001976a9149093b0ed1d457129f65dff4c4d3669c8c8b8acfe88ac"
+                        "00ca9a3b00000000160014aabbccddeeff00112233445566778899aabbccdd"
+                        "a4020000";
+
+    mining_notification_result_t result = { 0 };
+    esp_err_t err = coinbase_process_notification_ex(
+        &notify, "01020304", 0,
+        "DJKYme7vLUcgDAJGqjXbcmqdRVWnH5xQnU.Bitaxe01",
+        "lat-dgb.solofury.com",
+        COIN_PROFILE_AUTO,
+        true,
+        &result);
+    if (result.scriptsig) free(result.scriptsig);
+
+    TEST_ASSERT_EQUAL(ESP_OK, err);
+    TEST_ASSERT_EQUAL(COIN_PROFILE_DGB, result.resolved_coin.id);
+    TEST_ASSERT_EQUAL_STRING("DGB", result.resolved_coin.ticker);
+    TEST_ASSERT_EQUAL_UINT16(15, result.resolved_coin.block_time_s);
+    TEST_ASSERT_TRUE(result.user_is_address);
+    TEST_ASSERT_EQUAL_INT(2, result.output_count);
+    TEST_ASSERT_EQUAL_STRING("DJKYme7vLUcgDAJGqjXbcmqdRVWnH5xQnU", result.outputs[0].address);
+    TEST_ASSERT_TRUE(result.outputs[0].is_user_output);
+    TEST_ASSERT_TRUE(strncmp(result.outputs[1].address, "dgb1q", 5) == 0);
+    TEST_ASSERT_FALSE(result.outputs[1].is_user_output);
+    TEST_ASSERT_TRUE(result.user_value_satoshis == 99000000000ULL);
+    TEST_ASSERT_TRUE(result.total_value_satoshis == 100000000000ULL);
+    // BIP-54 and BIP-110 must both stay false for non-BTC coins
+    TEST_ASSERT_FALSE(result.bip54_signaling);
+    TEST_ASSERT_FALSE(result.bip110_signaling);
+}
+
+TEST_CASE("Raw script payload matches user payout even with Generic prefix and BTC keeps BIP signaling", "[coinbase_decoder]")
+{
+    mining_notify notify = { 0 };
+    notify.version = 0x20000010;
+    notify.job_id = "payload_job";
+    notify.coinbase_1 = "01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff0b02a502736f6c6f646762";
+    notify.coinbase_2 = "feffffff02"
+                        "001edc0c170000001976a9149093b0ed1d457129f65dff4c4d3669c8c8b8acfe88ac"
+                        "00ca9a3b00000000160014aabbccddeeff00112233445566778899aabbccdd"
+                        "a4020000";
+
+    // Force Generic profile (uses 0x00 prefix -> 1EBTEPBH...), payload matching must still credit DJKYme7v...
+    mining_notification_result_t gen_res = { 0 };
+    esp_err_t err = coinbase_process_notification_ex(
+        &notify, "01020304", 0,
+        "DJKYme7vLUcgDAJGqjXbcmqdRVWnH5xQnU.Bitaxe01",
+        "custom.pool.org",
+        COIN_PROFILE_GENERIC,
+        true,
+        &gen_res);
+    if (gen_res.scriptsig) free(gen_res.scriptsig);
+
+    TEST_ASSERT_EQUAL(ESP_OK, err);
+    TEST_ASSERT_EQUAL_STRING("1EBTEPBH34iPgA7g79Y351g2YMnUwsZ1Cp", gen_res.outputs[0].address);
+    TEST_ASSERT_TRUE(gen_res.outputs[0].is_user_output);
+    TEST_ASSERT_TRUE(gen_res.user_value_satoshis == 99000000000ULL);
+    TEST_ASSERT_FALSE(gen_res.bip54_signaling);
+    TEST_ASSERT_FALSE(gen_res.bip110_signaling);
+
+    // Same template processed under BTC profile emits BIP-54 and BIP-110
+    mining_notification_result_t btc_res = { 0 };
+    err = coinbase_process_notification_ex(
+        &notify, "01020304", 0,
+        "bc1q42aueh0wluqpzg3ng32kvaugnx4thnxa7y625x",
+        "solo.ckpool.org",
+        COIN_PROFILE_BTC,
+        true,
+        &btc_res);
+    if (btc_res.scriptsig) free(btc_res.scriptsig);
+
+    TEST_ASSERT_EQUAL(ESP_OK, err);
+    TEST_ASSERT_TRUE(btc_res.resolved_coin.is_btc_family);
+    TEST_ASSERT_TRUE(btc_res.bip54_signaling);
+    TEST_ASSERT_TRUE(btc_res.bip110_signaling);
+    TEST_ASSERT_FALSE(btc_res.outputs[0].is_user_output);
+    TEST_ASSERT_TRUE(btc_res.outputs[1].is_user_output);
+    TEST_ASSERT_TRUE(btc_res.user_value_satoshis == 1000000000ULL);
+}

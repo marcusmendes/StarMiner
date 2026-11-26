@@ -16,6 +16,7 @@
 #include <string.h>
 #include "utils.h"
 #include "coinbase_decoder.h"
+#include "nvs_config.h"
 #include <esp_heap_caps.h>
 #include "esp_transport_ssl.h"
 #include "freertos/task.h"
@@ -87,19 +88,36 @@ static void decode_mining_notification(GlobalState * GLOBAL_STATE, const mining_
     }
     memset(result, 0, sizeof(mining_notification_result_t));
 
-    const char *user = GLOBAL_STATE->SYSTEM_MODULE.is_using_fallback ? GLOBAL_STATE->SYSTEM_MODULE.fallback_pool_user : GLOBAL_STATE->SYSTEM_MODULE.pool_user;
-    bool decode_coinbase_tx = GLOBAL_STATE->SYSTEM_MODULE.is_using_fallback ? GLOBAL_STATE->SYSTEM_MODULE.fallback_pool_decode_coinbase_tx : GLOBAL_STATE->SYSTEM_MODULE.pool_decode_coinbase_tx;
+    bool use_fallback = GLOBAL_STATE->SYSTEM_MODULE.is_using_fallback;
+    const char *user = use_fallback ? GLOBAL_STATE->SYSTEM_MODULE.fallback_pool_user : GLOBAL_STATE->SYSTEM_MODULE.pool_user;
+    const char *stratum_url = use_fallback ? GLOBAL_STATE->SYSTEM_MODULE.fallback_pool_url : GLOBAL_STATE->SYSTEM_MODULE.pool_url;
+    bool decode_coinbase_tx = use_fallback ? GLOBAL_STATE->SYSTEM_MODULE.fallback_pool_decode_coinbase_tx : GLOBAL_STATE->SYSTEM_MODULE.pool_decode_coinbase_tx;
+    CoinProfileId coin_profile = (CoinProfileId)(use_fallback ? nvs_config_get_u16(NVS_CONFIG_FALLBACK_STRATUM_COIN_PROFILE) : nvs_config_get_u16(NVS_CONFIG_STRATUM_COIN_PROFILE));
+    if (use_fallback) {
+        GLOBAL_STATE->SYSTEM_MODULE.fallback_pool_coin_profile = (uint16_t)coin_profile;
+    } else {
+        GLOBAL_STATE->SYSTEM_MODULE.pool_coin_profile = (uint16_t)coin_profile;
+    }
 
-    if (coinbase_process_notification(mining_notification,
-                                     GLOBAL_STATE->extranonce_str,
-                                     GLOBAL_STATE->extranonce_2_len,
-                                     user,
-                                     decode_coinbase_tx,
-                                     result) != ESP_OK) {
+    if (coinbase_process_notification_ex(mining_notification,
+                                         GLOBAL_STATE->extranonce_str,
+                                         GLOBAL_STATE->extranonce_2_len,
+                                         user,
+                                         stratum_url,
+                                         coin_profile,
+                                         decode_coinbase_tx,
+                                         result) != ESP_OK) {
         ESP_LOGE(TAG, "Failed to process mining notification");
         free(result);
         return;
     }
+
+    // Update resolved coin metadata in GlobalState
+    strncpy(GLOBAL_STATE->coin_ticker, result->resolved_coin.ticker, COIN_TICKER_MAX_LEN - 1);
+    GLOBAL_STATE->coin_ticker[COIN_TICKER_MAX_LEN - 1] = '\0';
+    GLOBAL_STATE->coin_decimals = result->resolved_coin.decimals;
+    GLOBAL_STATE->coin_block_time_s = result->resolved_coin.block_time_s;
+    GLOBAL_STATE->coin_user_is_address = result->user_is_address;
 
     // Update network difficulty
     GLOBAL_STATE->network_nonce_diff = (uint64_t) result->network_difficulty;
@@ -111,19 +129,21 @@ static void decode_mining_notification(GlobalState * GLOBAL_STATE, const mining_
         GLOBAL_STATE->block_height = result->block_height;
     }
 
-    // Update block signals (BIP-110, BIP-54, etc.)
+    // Update block signals (BIP-110, BIP-54) only on Bitcoin family chains
     GLOBAL_STATE->block_signals_count = 0;
-    if (result->bip54_signaling) {
-        strncpy(GLOBAL_STATE->block_signals[GLOBAL_STATE->block_signals_count], "BIP-54", MAX_BLOCK_SIGNAL_LEN - 1);
-        GLOBAL_STATE->block_signals[GLOBAL_STATE->block_signals_count][MAX_BLOCK_SIGNAL_LEN - 1] = '\0';
-        GLOBAL_STATE->block_signals_count++;
-        ESP_LOGD(TAG, "BIP-54 signaling detected");
-    }
-    if (result->bip110_signaling) {
-        strncpy(GLOBAL_STATE->block_signals[GLOBAL_STATE->block_signals_count], "BIP-110", MAX_BLOCK_SIGNAL_LEN - 1);
-        GLOBAL_STATE->block_signals[GLOBAL_STATE->block_signals_count][MAX_BLOCK_SIGNAL_LEN - 1] = '\0';
-        GLOBAL_STATE->block_signals_count++;
-        ESP_LOGD(TAG, "BIP-110 signaling detected");
+    if (result->resolved_coin.is_btc_family) {
+        if (result->bip54_signaling) {
+            strncpy(GLOBAL_STATE->block_signals[GLOBAL_STATE->block_signals_count], "BIP-54", MAX_BLOCK_SIGNAL_LEN - 1);
+            GLOBAL_STATE->block_signals[GLOBAL_STATE->block_signals_count][MAX_BLOCK_SIGNAL_LEN - 1] = '\0';
+            GLOBAL_STATE->block_signals_count++;
+            ESP_LOGD(TAG, "BIP-54 signaling detected");
+        }
+        if (result->bip110_signaling) {
+            strncpy(GLOBAL_STATE->block_signals[GLOBAL_STATE->block_signals_count], "BIP-110", MAX_BLOCK_SIGNAL_LEN - 1);
+            GLOBAL_STATE->block_signals[GLOBAL_STATE->block_signals_count][MAX_BLOCK_SIGNAL_LEN - 1] = '\0';
+            GLOBAL_STATE->block_signals_count++;
+            ESP_LOGD(TAG, "BIP-110 signaling detected");
+        }
     }
 
     // Update scriptsig

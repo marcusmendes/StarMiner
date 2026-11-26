@@ -471,3 +471,182 @@ TEST_CASE("RTC diagnostics seal and validate across warm reset, ESP_RST_POWERON,
     TEST_ASSERT_EQUAL_UINT16(0, diag.learned_min_vcore_mv);
     TEST_ASSERT_TRUE(pcm_rtc_diag_validate(&diag, 550.0f, 1150, PCM_DVFS_PROFILE_PERFORMANCE));
 }
+
+TEST_CASE("Domain EWMA+CUSUM rejects transient 1s dips and detects sustained domain degradation", "[power_control][watchdog][cusum]")
+{
+    PcmDomainCusumState state;
+    pcm_domain_cusum_reset(&state);
+
+    for (int d = 0; d < PCM_CUSUM_MAX_DOMAINS; d++) {
+        TEST_ASSERT_FLOAT_WITHIN(0.0001f, 1.0f, state.ewma_ratio[d]);
+        TEST_ASSERT_FLOAT_WITHIN(0.0001f, 0.0f, state.cusum[d]);
+    }
+
+    uint8_t degraded_domain = 99;
+    float cusum_max = -1.0f;
+    const float balanced_hr[4] = {300.0f, 300.0f, 300.0f, 300.0f};
+    const float zero_hr[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+
+    // Guard cases: NULL pointers, single-domain ASIC, or zero total hashrate
+    TEST_ASSERT_FALSE(pcm_domain_cusum_update(NULL, balanced_hr, 4, PCM_CUSUM_DEFAULT_DRIFT_K, PCM_CUSUM_DEFAULT_THRESHOLD_H, &degraded_domain, &cusum_max));
+    TEST_ASSERT_FALSE(pcm_domain_cusum_update(&state, NULL, 4, PCM_CUSUM_DEFAULT_DRIFT_K, PCM_CUSUM_DEFAULT_THRESHOLD_H, &degraded_domain, &cusum_max));
+    TEST_ASSERT_FALSE(pcm_domain_cusum_update(&state, balanced_hr, 1, PCM_CUSUM_DEFAULT_DRIFT_K, PCM_CUSUM_DEFAULT_THRESHOLD_H, &degraded_domain, &cusum_max));
+    TEST_ASSERT_FALSE(pcm_domain_cusum_update(&state, zero_hr, 4, PCM_CUSUM_DEFAULT_DRIFT_K, PCM_CUSUM_DEFAULT_THRESHOLD_H, &degraded_domain, &cusum_max));
+
+    // Transient 1-2s dips around ~0.78 followed by nominal operation must not trigger
+    const float transient_dip_hr[4] = {234.0f, 300.0f, 300.0f, 300.0f};
+    for (int cycle = 0; cycle < 3; cycle++) {
+        TEST_ASSERT_FALSE(pcm_domain_cusum_update(&state, transient_dip_hr, 4,
+                                                  PCM_CUSUM_DEFAULT_DRIFT_K, PCM_CUSUM_DEFAULT_THRESHOLD_H,
+                                                  &degraded_domain, &cusum_max));
+        TEST_ASSERT_FALSE(pcm_domain_cusum_update(&state, transient_dip_hr, 4,
+                                                  PCM_CUSUM_DEFAULT_DRIFT_K, PCM_CUSUM_DEFAULT_THRESHOLD_H,
+                                                  &degraded_domain, &cusum_max));
+        for (int ok = 0; ok < 8; ok++) {
+            TEST_ASSERT_FALSE(pcm_domain_cusum_update(&state, balanced_hr, 4,
+                                                      PCM_CUSUM_DEFAULT_DRIFT_K, PCM_CUSUM_DEFAULT_THRESHOLD_H,
+                                                      &degraded_domain, &cusum_max));
+        }
+        TEST_ASSERT_TRUE(cusum_max < PCM_CUSUM_DEFAULT_THRESHOLD_H);
+    }
+
+    // Sustained degradation (~0.50 ratio on domain 2) must trigger within 8..15 seconds
+    const float degraded_hr[4] = {300.0f, 300.0f, 150.0f, 300.0f};
+    int trigger_tick = -1;
+    for (int t = 1; t <= 20; t++) {
+        if (pcm_domain_cusum_update(&state, degraded_hr, 4,
+                                    PCM_CUSUM_DEFAULT_DRIFT_K, PCM_CUSUM_DEFAULT_THRESHOLD_H,
+                                    &degraded_domain, &cusum_max)) {
+            trigger_tick = t;
+            break;
+        }
+    }
+    TEST_ASSERT_TRUE(trigger_tick >= 8 && trigger_tick <= 15);
+    TEST_ASSERT_EQUAL_UINT8(2, degraded_domain);
+    TEST_ASSERT_TRUE(cusum_max >= PCM_CUSUM_DEFAULT_THRESHOLD_H);
+
+    // Explicit reset zeroes accumulators and restores EWMA baseline to 1.0
+    pcm_domain_cusum_reset(&state);
+    for (int d = 0; d < PCM_CUSUM_MAX_DOMAINS; d++) {
+        TEST_ASSERT_FLOAT_WITHIN(0.0001f, 1.0f, state.ewma_ratio[d]);
+        TEST_ASSERT_FLOAT_WITHIN(0.0001f, 0.0f, state.cusum[d]);
+    }
+}
+
+TEST_CASE("Pre-watchdog hot relief respects DVFS profiles 0..3 and hardware caps", "[power_control][dvfs][watchdog]")
+{
+    // Profile 1 (Efficiency) with power, VR, and VCore headroom -> +5 mV step up
+    float dvfs_freq_off = 0.0f;
+    int16_t dvfs_volt_off = -10;
+    float wd_freq_off = 0.0f;
+    float learned_max_freq = 0.0f;
+    uint16_t learned_min_vcore = 0;
+
+    PcmPreWatchdogAction action = pcm_pre_watchdog_apply_relief(
+        PCM_DVFS_PROFILE_EFFICIENCY, 550.0f, 1150, 0, 24.0f, 72.0f,
+        &dvfs_freq_off, &dvfs_volt_off, &wd_freq_off, &learned_max_freq, &learned_min_vcore);
+    TEST_ASSERT_EQUAL_INT(PCM_PRE_WATCHDOG_ACTION_VCORE_STEP_UP, action);
+    TEST_ASSERT_EQUAL_INT16(-5, dvfs_volt_off);
+    TEST_ASSERT_EQUAL_UINT16(1145, learned_min_vcore);
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, 0.0f, wd_freq_off);
+
+    // Profile 1 (Efficiency) blocked from +5 mV by power >= 30.5 W -> -12.5 MHz via watchdog offset
+    action = pcm_pre_watchdog_apply_relief(
+        PCM_DVFS_PROFILE_EFFICIENCY, 550.0f, 1150, 0, 30.6f, 72.0f,
+        &dvfs_freq_off, &dvfs_volt_off, &wd_freq_off, &learned_max_freq, &learned_min_vcore);
+    TEST_ASSERT_EQUAL_INT(PCM_PRE_WATCHDOG_ACTION_FREQ_STEP_DOWN, action);
+    TEST_ASSERT_EQUAL_INT16(-5, dvfs_volt_off);
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, 12.5f, wd_freq_off);
+
+    // Profile 1 (Efficiency) blocked by VR temp >= 84.0 C -> -12.5 MHz
+    action = pcm_pre_watchdog_apply_relief(
+        PCM_DVFS_PROFILE_EFFICIENCY, 550.0f, 1150, 0, 24.0f, 84.2f,
+        &dvfs_freq_off, &dvfs_volt_off, &wd_freq_off, &learned_max_freq, &learned_min_vcore);
+    TEST_ASSERT_EQUAL_INT(PCM_PRE_WATCHDOG_ACTION_FREQ_STEP_DOWN, action);
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, 25.0f, wd_freq_off);
+
+    // Profile 1 (Efficiency) blocked by VCore + vdroop at 1250 mV cap -> -12.5 MHz
+    dvfs_volt_off = 0;
+    wd_freq_off = 0.0f;
+    action = pcm_pre_watchdog_apply_relief(
+        PCM_DVFS_PROFILE_EFFICIENCY, 550.0f, 1245, 5, 24.0f, 72.0f,
+        &dvfs_freq_off, &dvfs_volt_off, &wd_freq_off, &learned_max_freq, &learned_min_vcore);
+    TEST_ASSERT_EQUAL_INT(PCM_PRE_WATCHDOG_ACTION_FREQ_STEP_DOWN, action);
+    TEST_ASSERT_EQUAL_INT16(0, dvfs_volt_off);
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, 12.5f, wd_freq_off);
+
+    // Profile 3 (Performance) with margin -> +5 mV VCore and locks learned_min_vcore
+    dvfs_freq_off = 25.0f;
+    dvfs_volt_off = 0;
+    wd_freq_off = 0.0f;
+    learned_max_freq = 0.0f;
+    learned_min_vcore = 0;
+    action = pcm_pre_watchdog_apply_relief(
+        PCM_DVFS_PROFILE_PERFORMANCE, 600.0f, 1230, 0, 29.0f, 80.0f,
+        &dvfs_freq_off, &dvfs_volt_off, &wd_freq_off, &learned_max_freq, &learned_min_vcore);
+    TEST_ASSERT_EQUAL_INT(PCM_PRE_WATCHDOG_ACTION_VCORE_STEP_UP, action);
+    TEST_ASSERT_EQUAL_INT16(5, dvfs_volt_off);
+    TEST_ASSERT_EQUAL_UINT16(1235, learned_min_vcore);
+
+    // Profile 3 (Performance) at 1250 mV cap -> -12.5 MHz via dvfs_freq_offset and locks learned_max_freq
+    dvfs_volt_off = 20;
+    action = pcm_pre_watchdog_apply_relief(
+        PCM_DVFS_PROFILE_PERFORMANCE, 600.0f, 1230, 0, 29.0f, 80.0f,
+        &dvfs_freq_off, &dvfs_volt_off, &wd_freq_off, &learned_max_freq, &learned_min_vcore);
+    TEST_ASSERT_EQUAL_INT(PCM_PRE_WATCHDOG_ACTION_FREQ_STEP_DOWN, action);
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, 12.5f, dvfs_freq_off);
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, 612.5f, learned_max_freq);
+
+    // Profile 2 (Balanced) never increases VCore even with headroom; steps down -12.5 MHz and locks ceiling
+    dvfs_freq_off = 25.0f;
+    dvfs_volt_off = 10;
+    wd_freq_off = 0.0f;
+    learned_max_freq = 0.0f;
+    action = pcm_pre_watchdog_apply_relief(
+        PCM_DVFS_PROFILE_BALANCED, 550.0f, 1150, 0, 22.0f, 68.0f,
+        &dvfs_freq_off, &dvfs_volt_off, &wd_freq_off, &learned_max_freq, &learned_min_vcore);
+    TEST_ASSERT_EQUAL_INT(PCM_PRE_WATCHDOG_ACTION_FREQ_STEP_DOWN, action);
+    TEST_ASSERT_EQUAL_INT16(0, dvfs_volt_off);
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, 12.5f, dvfs_freq_off);
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, 562.5f, learned_max_freq);
+
+    // Profile 2 (Balanced) at profile floor (525 MHz) steps down via watchdog_freq_offset
+    dvfs_freq_off = -25.0f;
+    learned_max_freq = 0.0f;
+    wd_freq_off = 0.0f;
+    action = pcm_pre_watchdog_apply_relief(
+        PCM_DVFS_PROFILE_BALANCED, 550.0f, 1150, 0, 22.0f, 68.0f,
+        &dvfs_freq_off, &dvfs_volt_off, &wd_freq_off, &learned_max_freq, &learned_min_vcore);
+    TEST_ASSERT_EQUAL_INT(PCM_PRE_WATCHDOG_ACTION_FREQ_STEP_DOWN, action);
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, 525.0f, learned_max_freq);
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, 12.5f, wd_freq_off);
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, 512.5f,
+                             pcm_compute_effective_freq(PCM_DVFS_PROFILE_BALANCED, 550.0f,
+                                                        dvfs_freq_off, 0.0f, wd_freq_off));
+
+    // Profile 0 (Manual) never increases VCore and respects the 400.0 MHz hard floor
+    dvfs_freq_off = 0.0f;
+    dvfs_volt_off = 0;
+    wd_freq_off = 0.0f;
+    action = pcm_pre_watchdog_apply_relief(
+        PCM_DVFS_PROFILE_MANUAL, 415.0f, 1150, 0, 18.0f, 60.0f,
+        &dvfs_freq_off, &dvfs_volt_off, &wd_freq_off, &learned_max_freq, &learned_min_vcore);
+    TEST_ASSERT_EQUAL_INT(PCM_PRE_WATCHDOG_ACTION_FREQ_STEP_DOWN, action);
+    TEST_ASSERT_EQUAL_INT16(0, dvfs_volt_off);
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, 12.5f, wd_freq_off);
+
+    action = pcm_pre_watchdog_apply_relief(
+        PCM_DVFS_PROFILE_MANUAL, 415.0f, 1150, 0, 18.0f, 60.0f,
+        &dvfs_freq_off, &dvfs_volt_off, &wd_freq_off, &learned_max_freq, &learned_min_vcore);
+    TEST_ASSERT_EQUAL_INT(PCM_PRE_WATCHDOG_ACTION_FREQ_STEP_DOWN, action);
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, 15.0f, wd_freq_off);
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, 400.0f,
+                             pcm_compute_effective_freq(PCM_DVFS_PROFILE_MANUAL, 415.0f,
+                                                        dvfs_freq_off, 0.0f, wd_freq_off));
+
+    action = pcm_pre_watchdog_apply_relief(
+        PCM_DVFS_PROFILE_MANUAL, 415.0f, 1150, 0, 18.0f, 60.0f,
+        &dvfs_freq_off, &dvfs_volt_off, &wd_freq_off, &learned_max_freq, &learned_min_vcore);
+    TEST_ASSERT_EQUAL_INT(PCM_PRE_WATCHDOG_ACTION_NONE, action);
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, 15.0f, wd_freq_off);
+}

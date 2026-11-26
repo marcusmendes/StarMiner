@@ -45,6 +45,12 @@ typedef struct
     float learned_max_freq_mhz;
     uint16_t learned_min_vcore_mv;
     int64_t last_dvfs_step_us;
+    volatile bool pre_watchdog_trigger;
+    uint8_t pre_watchdog_asic;
+    uint8_t pre_watchdog_domain;
+    float pre_watchdog_cusum_max;
+    uint32_t pre_watchdog_recoveries;
+    int64_t last_pre_watchdog_action_us;
 } PowerManagementModule;
 
 void POWER_MANAGEMENT_init_frequency(void * pvParameters);

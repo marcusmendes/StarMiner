@@ -78,6 +78,16 @@ static bool has_frozen_domain(const HashrateMonitorModule * monitor, int asic_co
     return false;
 }
 
+static void reset_all_domain_cusum(PcmDomainCusumState * states, int asic_count)
+{
+    if (states == NULL) {
+        return;
+    }
+    for (int asic_nr = 0; asic_nr < asic_count; asic_nr++) {
+        pcm_domain_cusum_reset(&states[asic_nr]);
+    }
+}
+
 void hashrate_monitor_reset_measurements(void *pvParameters)
 {
     GlobalState * GLOBAL_STATE = (GlobalState *)pvParameters;    
@@ -196,6 +206,18 @@ void hashrate_monitor_task(void *pvParameters)
     }
     HASHRATE_MONITOR_MODULE->error_measurement = heap_caps_malloc(asic_count * sizeof(measurement_t), MALLOC_CAP_SPIRAM);
 
+    PcmDomainCusumState * domain_cusum_states = heap_caps_malloc(asic_count * sizeof(PcmDomainCusumState), MALLOC_CAP_SPIRAM);
+    if (domain_cusum_states == NULL) {
+        domain_cusum_states = malloc(asic_count * sizeof(PcmDomainCusumState));
+    }
+    reset_all_domain_cusum(domain_cusum_states, asic_count);
+
+    float * local_domain_hr = heap_caps_malloc(asic_count * PCM_CUSUM_MAX_DOMAINS * sizeof(float), MALLOC_CAP_SPIRAM);
+    if (local_domain_hr == NULL) {
+        local_domain_hr = malloc(asic_count * PCM_CUSUM_MAX_DOMAINS * sizeof(float));
+    }
+    int clamped_domains = (hash_domains > PCM_CUSUM_MAX_DOMAINS) ? PCM_CUSUM_MAX_DOMAINS : hash_domains;
+
     pthread_mutex_init(&HASHRATE_MONITOR_MODULE->lock, NULL);
     HASHRATE_MONITOR_MODULE->is_initialized = true;
 
@@ -232,6 +254,7 @@ void hashrate_monitor_task(void *pvParameters)
         int frozen_domain = 0;
         float frozen_hr = 0.0f;
         float frozen_other_avg = 0.0f;
+        bool have_domain_snapshot = false;
 
         if (is_asic_initialized) {
             ASIC_read_registers(GLOBAL_STATE);
@@ -242,6 +265,15 @@ void hashrate_monitor_task(void *pvParameters)
             float error_hashrate = sum_hashrates(HASHRATE_MONITOR_MODULE->error_measurement, asic_count);
             any_domain_frozen = has_frozen_domain(HASHRATE_MONITOR_MODULE, asic_count, hash_domains,
                                                   &frozen_asic, &frozen_domain, &frozen_hr, &frozen_other_avg);
+            if (clamped_domains > 1 && local_domain_hr != NULL) {
+                for (int asic_nr = 0; asic_nr < asic_count; asic_nr++) {
+                    for (int d = 0; d < clamped_domains; d++) {
+                        local_domain_hr[asic_nr * PCM_CUSUM_MAX_DOMAINS + d] =
+                            HASHRATE_MONITOR_MODULE->domain_measurements[asic_nr][d].hashrate;
+                    }
+                }
+                have_domain_snapshot = true;
+            }
             pthread_mutex_unlock(&HASHRATE_MONITOR_MODULE->lock);
 
             SYSTEM_MODULE->current_hashrate = current_hashrate;
@@ -274,6 +306,7 @@ void hashrate_monitor_task(void *pvParameters)
             zero_hashrate_accum_us = 0;
             domain_freeze_accum_us = 0;
             was_watchdog_armed = false;
+            reset_all_domain_cusum(domain_cusum_states, asic_count);
         } else {
             int64_t dt_us = was_watchdog_armed ? (now_us - last_watchdog_check_us) : 0;
             last_watchdog_check_us = now_us;
@@ -299,6 +332,7 @@ void hashrate_monitor_task(void *pvParameters)
                 zero_hashrate_accum_us = 0;
                 domain_freeze_accum_us = 0;
                 was_watchdog_armed = false;
+                reset_all_domain_cusum(domain_cusum_states, asic_count);
             } else if (domain_freeze_accum_us >= WATCHDOG_DOMAIN_FREEZE_US) {
                 ESP_LOGW(TAG, "ASIC Watchdog triggered: ASIC %d domain %d frozen (%.2f GH/s < 10%% of %.2f GH/s avg) for %lld s",
                          frozen_asic, frozen_domain, frozen_hr, frozen_other_avg,
@@ -308,6 +342,33 @@ void hashrate_monitor_task(void *pvParameters)
                 zero_hashrate_accum_us = 0;
                 domain_freeze_accum_us = 0;
                 was_watchdog_armed = false;
+                reset_all_domain_cusum(domain_cusum_states, asic_count);
+            } else if (GLOBAL_STATE->POWER_MANAGEMENT_MODULE.pre_watchdog_trigger) {
+                reset_all_domain_cusum(domain_cusum_states, asic_count);
+            } else if (have_domain_snapshot && clamped_domains > 1 &&
+                       domain_cusum_states != NULL && local_domain_hr != NULL) {
+                for (int asic_nr = 0; asic_nr < asic_count; asic_nr++) {
+                    uint8_t degraded_domain = 0;
+                    float cusum_max = 0.0f;
+                    if (pcm_domain_cusum_update(&domain_cusum_states[asic_nr],
+                                                &local_domain_hr[asic_nr * PCM_CUSUM_MAX_DOMAINS],
+                                                clamped_domains,
+                                                PCM_CUSUM_DEFAULT_DRIFT_K,
+                                                PCM_CUSUM_DEFAULT_THRESHOLD_H,
+                                                &degraded_domain,
+                                                &cusum_max)) {
+                        float ewma_val = domain_cusum_states[asic_nr].ewma_ratio[degraded_domain];
+                        GLOBAL_STATE->POWER_MANAGEMENT_MODULE.pre_watchdog_asic = (uint8_t) asic_nr;
+                        GLOBAL_STATE->POWER_MANAGEMENT_MODULE.pre_watchdog_domain = degraded_domain;
+                        GLOBAL_STATE->POWER_MANAGEMENT_MODULE.pre_watchdog_cusum_max = cusum_max;
+                        GLOBAL_STATE->POWER_MANAGEMENT_MODULE.pre_watchdog_trigger = true;
+                        ESP_LOGW(TAG,
+                                 "ASIC Pre-Watchdog triggered: ASIC %d domain %u sustained degradation (EWMA ratio: %.2f, CUSUM: %.2f >= %.2f)",
+                                 asic_nr, (unsigned) degraded_domain, ewma_val, cusum_max, PCM_CUSUM_DEFAULT_THRESHOLD_H);
+                        reset_all_domain_cusum(domain_cusum_states, asic_count);
+                        break;
+                    }
+                }
             }
         }
 

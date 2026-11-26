@@ -48,6 +48,17 @@ extern "C" {
 #define PCM_EMC2101_FAN_RPM_NUMERATOR 5400000U
 #define PCM_VR_TO_ASIC_TEMP_OFFSET_C  22.0f
 
+#define PCM_CUSUM_MAX_DOMAINS           4
+#define PCM_CUSUM_ALPHA                 0.20f
+#define PCM_CUSUM_RATIO_MAX             1.50f
+#define PCM_CUSUM_DEFAULT_DRIFT_K       0.78f
+#define PCM_CUSUM_DEFAULT_THRESHOLD_H   2.0f
+
+#define PCM_PRE_WATCHDOG_VCORE_STEP_MV  5
+#define PCM_PRE_WATCHDOG_MAX_POWER_W    30.5f
+#define PCM_PRE_WATCHDOG_MAX_VR_TEMP_C  84.0f
+#define PCM_PRE_WATCHDOG_COOLDOWN_US    (60LL * 1000000LL)
+
 #define PCM_RTC_DIAG_MAGIC 0x53545244U /* "STRD" */
 
 typedef enum {
@@ -77,6 +88,17 @@ typedef enum {
     PCM_DVFS_PROFILE_BALANCED = 2,
     PCM_DVFS_PROFILE_PERFORMANCE = 3,
 } PcmDvfsProfile;
+
+typedef struct {
+    float ewma_ratio[PCM_CUSUM_MAX_DOMAINS];
+    float cusum[PCM_CUSUM_MAX_DOMAINS];
+} PcmDomainCusumState;
+
+typedef enum {
+    PCM_PRE_WATCHDOG_ACTION_NONE = 0,
+    PCM_PRE_WATCHDOG_ACTION_VCORE_STEP_UP = 1,
+    PCM_PRE_WATCHDOG_ACTION_FREQ_STEP_DOWN = 2,
+} PcmPreWatchdogAction;
 
 /**
  * @brief Clamps an ASIC core voltage target to hardware safety limits.
@@ -236,6 +258,40 @@ bool pcm_rtc_diag_restore_or_reset(PcmRtcDiagnostics * diag,
                                    float target_frequency_mhz,
                                    uint16_t target_voltage_mv,
                                    uint16_t dvfs_profile);
+
+/**
+ * @brief Resets all domain EWMA ratios to 1.0f and unilateral CUSUM accumulators to 0.0f.
+ */
+void pcm_domain_cusum_reset(PcmDomainCusumState * state);
+
+/**
+ * @brief Updates 1 Hz per-domain EWMA ratio against peer average and unilateral CUSUM accumulator.
+ *
+ * @return true when any domain crosses cusum >= threshold_h (populating out_domain and out_cusum).
+ */
+bool pcm_domain_cusum_update(PcmDomainCusumState * state,
+                             const float * domain_hr,
+                             int domain_count,
+                             float drift_k,
+                             float threshold_h,
+                             uint8_t * out_domain,
+                             float * out_cusum);
+
+/**
+ * @brief Applies profile-aware hot relief in RAM (+5 mV VCore or -12.5 MHz frequency)
+ *        when the domain CUSUM pre-watchdog triggers, without stopping the ASIC.
+ */
+PcmPreWatchdogAction pcm_pre_watchdog_apply_relief(uint16_t profile,
+                                                   float target_frequency_mhz,
+                                                   uint16_t target_voltage_mv,
+                                                   uint16_t vdroop_offset_mv,
+                                                   float power_w,
+                                                   float vr_temp_c,
+                                                   float * dvfs_freq_offset_mhz,
+                                                   int16_t * dvfs_voltage_offset_mv,
+                                                   float * watchdog_freq_offset_mhz,
+                                                   float * learned_max_freq_mhz,
+                                                   uint16_t * learned_min_vcore_mv);
 
 #ifdef __cplusplus
 }

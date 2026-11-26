@@ -480,3 +480,158 @@ bool pcm_rtc_diag_restore_or_reset(PcmRtcDiagnostics * diag,
     pcm_rtc_diag_seal(diag, target_frequency_mhz, target_voltage_mv, dvfs_profile);
     return false;
 }
+
+void pcm_domain_cusum_reset(PcmDomainCusumState * state)
+{
+    if (state == NULL) {
+        return;
+    }
+    for (int d = 0; d < PCM_CUSUM_MAX_DOMAINS; d++) {
+        state->ewma_ratio[d] = 1.0f;
+        state->cusum[d] = 0.0f;
+    }
+}
+
+bool pcm_domain_cusum_update(PcmDomainCusumState * state,
+                             const float * domain_hr,
+                             int domain_count,
+                             float drift_k,
+                             float threshold_h,
+                             uint8_t * out_domain,
+                             float * out_cusum)
+{
+    if (state == NULL || domain_hr == NULL || domain_count <= 1) {
+        return false;
+    }
+
+    int count = (domain_count > PCM_CUSUM_MAX_DOMAINS) ? PCM_CUSUM_MAX_DOMAINS : domain_count;
+    if (count <= 1) {
+        return false;
+    }
+
+    float sum = 0.0f;
+    for (int d = 0; d < count; d++) {
+        if (isnan(domain_hr[d])) {
+            return false;
+        }
+        float val = (domain_hr[d] > 0.0f) ? domain_hr[d] : 0.0f;
+        sum += val;
+    }
+
+    if (sum <= 0.0001f) {
+        return false;
+    }
+
+    uint8_t best_domain = 0;
+    float max_s = -1.0f;
+
+    for (int d = 0; d < count; d++) {
+        float d_hr = (domain_hr[d] > 0.0f) ? domain_hr[d] : 0.0f;
+        float other_avg = (sum - d_hr) / (float) (count - 1);
+        if (other_avg > 0.0001f) {
+            float ratio = d_hr / other_avg;
+            if (ratio < 0.0f) {
+                ratio = 0.0f;
+            } else if (ratio > PCM_CUSUM_RATIO_MAX) {
+                ratio = PCM_CUSUM_RATIO_MAX;
+            }
+            state->ewma_ratio[d] = (PCM_CUSUM_ALPHA * ratio) +
+                                   ((1.0f - PCM_CUSUM_ALPHA) * state->ewma_ratio[d]);
+            state->cusum[d] = fmaxf(0.0f, state->cusum[d] + (drift_k - state->ewma_ratio[d]));
+        }
+
+        if (state->cusum[d] > max_s) {
+            max_s = state->cusum[d];
+            best_domain = (uint8_t) d;
+        }
+    }
+
+    if (max_s < 0.0f) {
+        max_s = 0.0f;
+    }
+    if (out_domain != NULL) {
+        *out_domain = best_domain;
+    }
+    if (out_cusum != NULL) {
+        *out_cusum = max_s;
+    }
+
+    return max_s >= threshold_h;
+}
+
+PcmPreWatchdogAction pcm_pre_watchdog_apply_relief(uint16_t profile,
+                                                   float target_frequency_mhz,
+                                                   uint16_t target_voltage_mv,
+                                                   uint16_t vdroop_offset_mv,
+                                                   float power_w,
+                                                   float vr_temp_c,
+                                                   float * dvfs_freq_offset_mhz,
+                                                   int16_t * dvfs_voltage_offset_mv,
+                                                   float * watchdog_freq_offset_mhz,
+                                                   float * learned_max_freq_mhz,
+                                                   uint16_t * learned_min_vcore_mv)
+{
+    float dvfs_freq_off = (dvfs_freq_offset_mhz != NULL) ? *dvfs_freq_offset_mhz : 0.0f;
+    int16_t dvfs_volt_off = (dvfs_voltage_offset_mv != NULL) ? *dvfs_voltage_offset_mv : 0;
+    float wd_freq_off = (watchdog_freq_offset_mhz != NULL) ? *watchdog_freq_offset_mhz : 0.0f;
+
+    if (profile == PCM_DVFS_PROFILE_BALANCED) {
+        dvfs_volt_off = 0;
+    }
+
+    uint16_t cur_base_mv = pcm_compute_effective_vcore(target_voltage_mv, dvfs_volt_off, 0, 0);
+    uint16_t effective_vcore_mv = pcm_compute_effective_vcore(target_voltage_mv, dvfs_volt_off, 0, vdroop_offset_mv);
+
+    bool profile_allows_vcore = (profile == PCM_DVFS_PROFILE_EFFICIENCY ||
+                                 profile == PCM_DVFS_PROFILE_PERFORMANCE);
+    bool power_ok = !isnan(power_w) && (power_w >= 0.0f) && (power_w < PCM_PRE_WATCHDOG_MAX_POWER_W);
+    bool vr_ok = !isnan(vr_temp_c) && (vr_temp_c >= 0.0f) && (vr_temp_c < PCM_PRE_WATCHDOG_MAX_VR_TEMP_C);
+    bool vcore_ok = (effective_vcore_mv <= (PCM_VCORE_MAX_MV - PCM_PRE_WATCHDOG_VCORE_STEP_MV)) &&
+                    (cur_base_mv <= (PCM_VCORE_MAX_MV - PCM_PRE_WATCHDOG_VCORE_STEP_MV));
+
+    if (profile_allows_vcore && power_ok && vr_ok && vcore_ok) {
+        uint16_t next_base_mv = pcm_clamp_vcore_mv((int32_t) cur_base_mv + PCM_PRE_WATCHDOG_VCORE_STEP_MV);
+        dvfs_volt_off = (int16_t) ((int32_t) next_base_mv - (int32_t) target_voltage_mv);
+        lock_learned_min_vcore(learned_min_vcore_mv, next_base_mv);
+        if (dvfs_voltage_offset_mv != NULL) {
+            *dvfs_voltage_offset_mv = dvfs_volt_off;
+        }
+        return PCM_PRE_WATCHDOG_ACTION_VCORE_STEP_UP;
+    }
+
+    float cur_base_freq = pcm_compute_dvfs_base_freq(profile, target_frequency_mhz, dvfs_freq_off);
+    float prev_eff_freq = pcm_compute_effective_freq(profile, target_frequency_mhz, dvfs_freq_off, 0.0f, wd_freq_off);
+
+    if (profile == PCM_DVFS_PROFILE_BALANCED || profile == PCM_DVFS_PROFILE_PERFORMANCE) {
+        float min_freq = PCM_FREQ_MIN_MHZ;
+        float max_freq = PCM_DVFS_PERFORMANCE_MAX_FREQ_MHZ;
+        pcm_get_dvfs_freq_bounds(profile, &min_freq, &max_freq);
+
+        if (cur_base_freq > (min_freq + 0.001f) && wd_freq_off <= 0.001f) {
+            float next_freq = fmaxf(min_freq, cur_base_freq - PCM_DVFS_FREQ_STEP_MHZ);
+            dvfs_freq_off = next_freq - target_frequency_mhz;
+            lock_learned_max_freq(learned_max_freq_mhz, next_freq);
+        } else {
+            lock_learned_max_freq(learned_max_freq_mhz, min_freq);
+            step_watchdog_freq_offset(cur_base_freq, &wd_freq_off);
+        }
+    } else {
+        step_watchdog_freq_offset(cur_base_freq, &wd_freq_off);
+    }
+
+    if (dvfs_freq_offset_mhz != NULL) {
+        *dvfs_freq_offset_mhz = dvfs_freq_off;
+    }
+    if (dvfs_voltage_offset_mv != NULL) {
+        *dvfs_voltage_offset_mv = dvfs_volt_off;
+    }
+    if (watchdog_freq_offset_mhz != NULL) {
+        *watchdog_freq_offset_mhz = wd_freq_off;
+    }
+
+    float next_eff_freq = pcm_compute_effective_freq(profile, target_frequency_mhz, dvfs_freq_off, 0.0f, wd_freq_off);
+    if (next_eff_freq < (prev_eff_freq - 0.001f)) {
+        return PCM_PRE_WATCHDOG_ACTION_FREQ_STEP_DOWN;
+    }
+    return PCM_PRE_WATCHDOG_ACTION_NONE;
+}

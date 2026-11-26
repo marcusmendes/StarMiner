@@ -264,6 +264,7 @@ static void reset_watchdog_state(PowerManagementModule * power_management)
     power_management->watchdog_consecutive_failures = 0;
     power_management->watchdog_last_failure_us = 0;
     power_management->asic_watchdog_trigger = false;
+    power_management->pre_watchdog_trigger = false;
 }
 
 static void handle_asic_watchdog(GlobalState * GLOBAL_STATE)
@@ -571,6 +572,77 @@ static void handle_vdroop_compensation(GlobalState * GLOBAL_STATE)
     }
 }
 
+static void handle_pre_watchdog(GlobalState * GLOBAL_STATE)
+{
+    PowerManagementModule * power_management = &GLOBAL_STATE->POWER_MANAGEMENT_MODULE;
+    SystemModule * sys_module = &GLOBAL_STATE->SYSTEM_MODULE;
+
+    if (!power_management->pre_watchdog_trigger) {
+        return;
+    }
+    power_management->pre_watchdog_trigger = false;
+
+    if (!GLOBAL_STATE->ASIC_initalized || GLOBAL_STATE->SELF_TEST_MODULE.is_active ||
+        sys_module->overheat_mode || power_management->throttle_active ||
+        sys_module->power_fault != 0 || sys_module->hardware_fault ||
+        sys_module->mining_paused || sys_module->pools_unavailable) {
+        return;
+    }
+
+    int64_t now_us = esp_timer_get_time();
+    if (power_management->last_pre_watchdog_action_us > 0 &&
+        (now_us - power_management->last_pre_watchdog_action_us) < PCM_PRE_WATCHDOG_COOLDOWN_US) {
+        ESP_LOGI(TAG, "ASIC Pre-Watchdog trigger ignored during 60s cooldown (ASIC %u domain %u, CUSUM: %.2f)",
+                 power_management->pre_watchdog_asic,
+                 power_management->pre_watchdog_domain,
+                 power_management->pre_watchdog_cusum_max);
+        return;
+    }
+
+    float prev_learned_freq = power_management->learned_max_freq_mhz;
+    uint16_t prev_learned_mv = power_management->learned_min_vcore_mv;
+    float vr_for_relief = is_vr_temp_valid(GLOBAL_STATE, power_management->vr_temp)
+                              ? fmaxf(0.0f, power_management->vr_temp)
+                              : NAN;
+
+    PcmPreWatchdogAction action = pcm_pre_watchdog_apply_relief(power_management->dvfs_profile,
+                                                                power_management->target_frequency,
+                                                                power_management->target_voltage,
+                                                                power_management->vdroop_offset_mv,
+                                                                power_management->power,
+                                                                vr_for_relief,
+                                                                &power_management->dvfs_freq_offset_mhz,
+                                                                &power_management->dvfs_voltage_offset_mv,
+                                                                &power_management->watchdog_freq_offset_mhz,
+                                                                &power_management->learned_max_freq_mhz,
+                                                                &power_management->learned_min_vcore_mv);
+
+    if (action != PCM_PRE_WATCHDOG_ACTION_NONE) {
+        power_management->pre_watchdog_recoveries++;
+        power_management->last_pre_watchdog_action_us = now_us;
+        power_management->last_dvfs_step_us = now_us;
+
+        float effective_freq = get_effective_frequency_mhz(power_management);
+        uint16_t effective_vcore = get_effective_voltage_mv(power_management);
+        ESP_LOGW(TAG,
+                 "ASIC Pre-Watchdog hot relief #%lu (%s): ASIC %u domain %u (CUSUM: %.2f) -> %.1f MHz / %u mV (learned max: %.1f MHz, learned min VCore: %u mV)",
+                 (unsigned long) power_management->pre_watchdog_recoveries,
+                 (action == PCM_PRE_WATCHDOG_ACTION_VCORE_STEP_UP) ? "+5 mV VCore" : "-12.5 MHz freq",
+                 power_management->pre_watchdog_asic,
+                 power_management->pre_watchdog_domain,
+                 power_management->pre_watchdog_cusum_max,
+                 effective_freq,
+                 effective_vcore,
+                 power_management->learned_max_freq_mhz,
+                 power_management->learned_min_vcore_mv);
+
+        if (power_management->learned_min_vcore_mv != prev_learned_mv ||
+            fabsf(power_management->learned_max_freq_mhz - prev_learned_freq) > 0.001f) {
+            sync_rtc_diagnostics(power_management);
+        }
+    }
+}
+
 static void handle_thermal_state_machine(GlobalState * GLOBAL_STATE, bool * prev_asic_initialized)
 {
     PowerManagementModule * power_management = &GLOBAL_STATE->POWER_MANAGEMENT_MODULE;
@@ -621,6 +693,7 @@ static void handle_thermal_state_machine(GlobalState * GLOBAL_STATE, bool * prev
 
     // 2. Active Overheat Latch / Safe Resume Check
     if (sys_module->overheat_mode) {
+        power_management->pre_watchdog_trigger = false;
         if (!nvs_overheat_mode) {
             // While ASIC is powered down, Thermal_get_chip_temp() returns -1 (invalid).
             // Check every valid sensor reading against safe recovery limits before restarting.
@@ -647,6 +720,7 @@ static void handle_thermal_state_machine(GlobalState * GLOBAL_STATE, bool * prev
     if (nvs_overheat_mode) {
         ESP_LOGW(TAG, "Overheat mode enabled via NVS - stopping mining");
         sys_module->overheat_mode = true;
+        power_management->pre_watchdog_trigger = false;
         if (GLOBAL_STATE->ASIC_initalized || power_management->actual_voltage_mv > 0) {
             mining_stop(GLOBAL_STATE);
             *prev_asic_initialized = GLOBAL_STATE->ASIC_initalized;
@@ -762,6 +836,12 @@ void POWER_MANAGEMENT_task(void * pvParameters)
                                            : nvs_config_get_u16(NVS_CONFIG_ASIC_VOLTAGE);
     power_management->actual_voltage_mv = 0;
     power_management->fan_stall = false;
+    power_management->pre_watchdog_asic = 0;
+    power_management->pre_watchdog_domain = 0;
+    power_management->pre_watchdog_cusum_max = 0.0f;
+    power_management->pre_watchdog_recoveries = 0;
+    power_management->last_pre_watchdog_action_us = 0;
+    reset_watchdog_state(power_management);
     reset_thermal_throttle_state(power_management);
     reset_vdroop_state(power_management);
     reset_dvfs_state(power_management, esp_timer_get_time());
@@ -861,6 +941,8 @@ void POWER_MANAGEMENT_task(void * pvParameters)
             last_nvs_dvfs_profile = raw_dvfs_profile;
         }
         if (freq_changed || volt_changed || profile_changed) {
+            power_management->pre_watchdog_trigger = false;
+            power_management->last_pre_watchdog_action_us = 0;
             reset_dvfs_state(power_management, now_us);
             sync_rtc_diagnostics(power_management);
         }
@@ -883,6 +965,7 @@ void POWER_MANAGEMENT_task(void * pvParameters)
         // If we've paused or have a hardware fault, skip doing anything else
         if (is_paused || sys_module->hardware_fault) {
             power_management->asic_watchdog_trigger = false;
+            power_management->pre_watchdog_trigger = false;
             power_management->last_dvfs_step_us = now_us;
             vTaskDelay(POLL_RATE / portTICK_PERIOD_MS);
             continue;
@@ -893,8 +976,10 @@ void POWER_MANAGEMENT_task(void * pvParameters)
         if (!sys_module->overheat_mode) {
             handle_dvfs_autotuner(GLOBAL_STATE);
             handle_vdroop_compensation(GLOBAL_STATE);
+            handle_pre_watchdog(GLOBAL_STATE);
             apply_effective_power_and_freq(GLOBAL_STATE);
         } else {
+            power_management->pre_watchdog_trigger = false;
             reset_dvfs_state(power_management, esp_timer_get_time());
             if (s_rtc_diag.learned_max_freq_mhz != 0.0f || s_rtc_diag.learned_min_vcore_mv != 0) {
                 sync_rtc_diagnostics(power_management);
@@ -908,6 +993,7 @@ void POWER_MANAGEMENT_task(void * pvParameters)
 
         if (power_management->asic_watchdog_trigger) {
             power_management->asic_watchdog_trigger = false;
+            power_management->pre_watchdog_trigger = false;
 
             if (!sys_module->overheat_mode && sys_module->power_fault == 0 &&
                 !sys_module->hardware_fault && !sys_module->mining_paused &&

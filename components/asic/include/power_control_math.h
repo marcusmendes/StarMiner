@@ -24,6 +24,8 @@ extern "C" {
 #define PCM_DVFS_BALANCED_MAX_FREQ_MHZ    625.0f
 #define PCM_DVFS_PERFORMANCE_MIN_FREQ_MHZ 550.0f
 #define PCM_DVFS_PERFORMANCE_MAX_FREQ_MHZ 675.0f
+#define PCM_DVFS_ADAPTIVE_MIN_FREQ_MHZ    500.0f
+#define PCM_DVFS_ADAPTIVE_MAX_FREQ_MHZ    675.0f
 
 #define PCM_DVFS_FREQ_STEP_MHZ            12.5f
 #define PCM_DVFS_VCORE_STEP_DOWN_MV       5
@@ -59,7 +61,7 @@ extern "C" {
 #define PCM_PRE_WATCHDOG_MAX_VR_TEMP_C  84.0f
 #define PCM_PRE_WATCHDOG_COOLDOWN_US    (60LL * 1000000LL)
 
-#define PCM_RTC_DIAG_MAGIC 0x53545244U /* "STRD" */
+#define PCM_RTC_DIAG_MAGIC 0x53545245U /* "STRE" */
 
 typedef enum {
     PCM_WATCHDOG_REASON_NONE = 0,
@@ -80,6 +82,9 @@ typedef struct {
     uint8_t last_watchdog_reason;
     uint8_t reserved;
     float learned_max_freq_mhz;
+    float adaptive_best_freq_mhz;
+    uint16_t adaptive_best_vcore_mv;
+    uint16_t reserved2;
 } PcmRtcDiagnostics;
 
 typedef enum {
@@ -87,6 +92,7 @@ typedef enum {
     PCM_DVFS_PROFILE_EFFICIENCY = 1,
     PCM_DVFS_PROFILE_BALANCED = 2,
     PCM_DVFS_PROFILE_PERFORMANCE = 3,
+    PCM_DVFS_PROFILE_ADAPTIVE = 4,
 } PcmDvfsProfile;
 
 typedef struct {

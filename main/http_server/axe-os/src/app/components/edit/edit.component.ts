@@ -47,6 +47,7 @@ export class EditComponent implements OnInit, OnDestroy, OnChanges {
     { name: 'Efficiency (500–600 MHz)', value: 1 },
     { name: 'Balanced (525–625 MHz)', value: 2 },
     { name: 'Performance (550–675 MHz)', value: 3 },
+    { name: 'Adaptive (2D Bandit 500–675 MHz)', value: 4 },
   ];
   public displayTimeoutControl: FormControl;
   public statsFrequencyControl: FormControl;
@@ -173,7 +174,7 @@ export class EditComponent implements OnInit, OnDestroy, OnChanges {
           ]],
           coreVoltage: [info.targetVoltage ?? info.coreVoltage, [Validators.required]],
           frequency: [info.targetFrequency ?? info.frequency, [Validators.required]],
-          dvfsProfile: [info.dvfsProfile ?? 0, [Validators.required, Validators.min(0), Validators.max(3)]],
+          dvfsProfile: [info.dvfsProfile ?? 0, [Validators.required, Validators.min(0), Validators.max(4)]],
           autofanspeed: [info.autofanspeed == 1, [Validators.required]],
           minfanspeed: [info.minFanSpeed, [Validators.required]],
           manualFanSpeed: [info.manualFanSpeed, [Validators.required]],

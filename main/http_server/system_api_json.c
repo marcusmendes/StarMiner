@@ -99,6 +99,9 @@ static void system_api_add_telemetry(cJSON *root, GlobalState *g) {
     cJSON_AddNumberToObject(root, "lastWatchdogReason", g->POWER_MANAGEMENT_MODULE.last_watchdog_reason);
     cJSON_AddFloatToObject(root, "learnedMaxFreq", g->POWER_MANAGEMENT_MODULE.learned_max_freq_mhz);
     cJSON_AddNumberToObject(root, "learnedMinVcore", g->POWER_MANAGEMENT_MODULE.learned_min_vcore_mv);
+    cJSON_AddNumberToObject(root, "preWatchdogRecoveries", g->POWER_MANAGEMENT_MODULE.pre_watchdog_recoveries);
+    cJSON_AddFloatToObject(root, "adaptiveBestFreq", g->POWER_MANAGEMENT_MODULE.adaptive_best_freq_mhz);
+    cJSON_AddNumberToObject(root, "adaptiveBestVcore", g->POWER_MANAGEMENT_MODULE.adaptive_best_vcore_mv);
     cJSON_AddStringToObject(root, "wifiStatus", g->SYSTEM_MODULE.wifi_status);
 
     int8_t rssi = -90;

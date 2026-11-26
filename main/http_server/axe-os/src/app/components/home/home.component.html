@@ -274,7 +274,10 @@
                         <h6 class="flex justify-content-between mb-1">
                             <span>
                                 ASIC Frequency
-                                <small *ngIf="(info.dvfsProfile ?? 0) > 0" class="text-500 ml-1">({{getDvfsProfileLabel(info.dvfsProfile)}})</small>
+                                <small *ngIf="(info.dvfsProfile ?? 0) > 0"
+                                    class="text-500 ml-1"
+                                    [pTooltip]="(info.adaptiveBestFreq > 0 && info.adaptiveBestVcore > 0) ? ('Adaptive Safe Point: ' + info.adaptiveBestFreq + ' MHz @ ' + info.adaptiveBestVcore + ' mV') : ''"
+                                    tooltipPosition="top">({{getDvfsProfileLabel(info.dvfsProfile)}})</small>
                             </span>
                             <span>
                                 {{info.actualFrequency | number: '1.0-4'}} MHz

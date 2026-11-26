@@ -11,6 +11,7 @@ SRCS
     "frequency_transition_bmXX.c"
     "pll.c"
     "power_control_math.c"
+    "dvfs_bandit.c"
 
 INCLUDE_DIRS 
     "include"

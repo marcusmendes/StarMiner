@@ -1078,6 +1078,7 @@ export class HomeComponent implements OnInit, OnDestroy {
       case 1: return 'Efficiency';
       case 2: return 'Balanced';
       case 3: return 'Performance';
+      case 4: return 'Adaptive';
       default: return 'Manual';
     }
   }

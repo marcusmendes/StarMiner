@@ -44,6 +44,8 @@ typedef struct
     int16_t dvfs_voltage_offset_mv;
     float learned_max_freq_mhz;
     uint16_t learned_min_vcore_mv;
+    float adaptive_best_freq_mhz;
+    uint16_t adaptive_best_vcore_mv;
     int64_t last_dvfs_step_us;
     volatile bool pre_watchdog_trigger;
     uint8_t pre_watchdog_asic;

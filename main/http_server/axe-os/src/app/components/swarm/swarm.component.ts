@@ -522,6 +522,7 @@ private isIpAddress(value: string): boolean {
       case 1: return 'Efficiency';
       case 2: return 'Balanced';
       case 3: return 'Performance';
+      case 4: return 'Adaptive';
       default: return 'Manual';
     }
   }
@@ -531,17 +532,24 @@ private isIpAddress(value: string): boolean {
       case 1: return 'p-badge-success';
       case 2: return 'p-badge-info';
       case 3: return 'p-badge-warning';
+      case 4: return 'p-badge-primary';
       default: return 'p-badge-secondary';
     }
   }
 
   public getLearnedBoundsTooltip(axe: any): string {
     const parts: string[] = [];
+    if ((axe?.adaptiveBestFreq ?? 0) > 0 && (axe?.adaptiveBestVcore ?? 0) > 0) {
+      parts.push(`Safe Point: ${axe.adaptiveBestFreq} MHz @ ${axe.adaptiveBestVcore} mV`);
+    }
     if ((axe?.learnedMaxFreq ?? 0) > 0) {
       parts.push(`Max Freq: ${axe.learnedMaxFreq} MHz`);
     }
     if ((axe?.learnedMinVcore ?? 0) > 0) {
       parts.push(`Min VCore: ${axe.learnedMinVcore} mV`);
+    }
+    if ((axe?.preWatchdogRecoveries ?? 0) > 0) {
+      parts.push(`Pre-WD: ${axe.preWatchdogRecoveries}`);
     }
     return parts.length ? `Learned silicon bounds (${parts.join(', ')})` : '';
   }

@@ -179,6 +179,7 @@ describe('HomeComponent', () => {
       expect(component.getDvfsProfileLabel(1)).toBe('Efficiency');
       expect(component.getDvfsProfileLabel(2)).toBe('Balanced');
       expect(component.getDvfsProfileLabel(3)).toBe('Performance');
+      expect(component.getDvfsProfileLabel(4)).toBe('Adaptive');
     });
   });
 });

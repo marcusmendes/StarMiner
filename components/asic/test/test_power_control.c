@@ -61,6 +61,13 @@ TEST_CASE("Effective frequency enforces 400 MHz floor and DVFS profile envelopes
     TEST_ASSERT_FLOAT_WITHIN(0.001f, 550.0f, pcm_compute_dvfs_base_freq(PCM_DVFS_PROFILE_PERFORMANCE, 500.0f, 0.0f));
     TEST_ASSERT_FLOAT_WITHIN(0.001f, 675.0f, pcm_compute_dvfs_base_freq(PCM_DVFS_PROFILE_PERFORMANCE, 650.0f, 50.0f));
 
+    // Profile 4 (Adaptive): [500, 675] MHz
+    TEST_ASSERT_TRUE(pcm_get_dvfs_freq_bounds(PCM_DVFS_PROFILE_ADAPTIVE, &min_freq, &max_freq));
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, 500.0f, min_freq);
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, 675.0f, max_freq);
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, 500.0f, pcm_compute_dvfs_base_freq(PCM_DVFS_PROFILE_ADAPTIVE, 475.0f, 0.0f));
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, 675.0f, pcm_compute_dvfs_base_freq(PCM_DVFS_PROFILE_ADAPTIVE, 650.0f, 50.0f));
+
     // Effective frequency applies thermal and watchdog offsets with 400.0 MHz floor
     TEST_ASSERT_FLOAT_WITHIN(0.001f, 500.0f, pcm_compute_effective_freq(PCM_DVFS_PROFILE_BALANCED, 550.0f, 0.0f, 25.0f, 25.0f));
     TEST_ASSERT_FLOAT_WITHIN(0.001f, 407.5f, pcm_compute_effective_freq(PCM_DVFS_PROFILE_MANUAL, 420.0f, 0.0f, 12.5f, 0.0f));
@@ -407,6 +414,8 @@ TEST_CASE("RTC diagnostics seal and validate across warm reset, ESP_RST_POWERON,
     diag.last_watchdog_reason = PCM_WATCHDOG_REASON_FROZEN_DOMAIN;
     diag.learned_max_freq_mhz = 612.5f;
     diag.learned_min_vcore_mv = 1160;
+    diag.adaptive_best_freq_mhz = 587.5f;
+    diag.adaptive_best_vcore_mv = 1140;
     pcm_rtc_diag_seal(&diag, 550.0f, 1150, PCM_DVFS_PROFILE_BALANCED);
 
     TEST_ASSERT_EQUAL_UINT32(PCM_RTC_DIAG_MAGIC, diag.magic);
@@ -420,6 +429,8 @@ TEST_CASE("RTC diagnostics seal and validate across warm reset, ESP_RST_POWERON,
     TEST_ASSERT_EQUAL_UINT8(PCM_WATCHDOG_REASON_FROZEN_DOMAIN, diag.last_watchdog_reason);
     TEST_ASSERT_FLOAT_WITHIN(0.001f, 612.5f, diag.learned_max_freq_mhz);
     TEST_ASSERT_EQUAL_UINT16(1160, diag.learned_min_vcore_mv);
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, 587.5f, diag.adaptive_best_freq_mhz);
+    TEST_ASSERT_EQUAL_UINT16(1140, diag.adaptive_best_vcore_mv);
 
     // NVS target change (frequency, voltage, or DVFS profile): must invalidate and reset
     TEST_ASSERT_FALSE(pcm_rtc_diag_validate(&diag, 575.0f, 1150, PCM_DVFS_PROFILE_BALANCED));
@@ -431,7 +442,15 @@ TEST_CASE("RTC diagnostics seal and validate across warm reset, ESP_RST_POWERON,
     TEST_ASSERT_EQUAL_UINT8(PCM_WATCHDOG_REASON_NONE, diag.last_watchdog_reason);
     TEST_ASSERT_FLOAT_WITHIN(0.001f, 0.0f, diag.learned_max_freq_mhz);
     TEST_ASSERT_EQUAL_UINT16(0, diag.learned_min_vcore_mv);
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, 0.0f, diag.adaptive_best_freq_mhz);
+    TEST_ASSERT_EQUAL_UINT16(0, diag.adaptive_best_vcore_mv);
     TEST_ASSERT_TRUE(pcm_rtc_diag_validate(&diag, 575.0f, 1150, PCM_DVFS_PROFILE_BALANCED));
+
+    // Out-of-bounds adaptive safe point fails validation
+    diag.adaptive_best_freq_mhz = 587.5f;
+    diag.adaptive_best_vcore_mv = 900;
+    pcm_rtc_diag_seal(&diag, 550.0f, 1150, PCM_DVFS_PROFILE_ADAPTIVE);
+    TEST_ASSERT_FALSE(pcm_rtc_diag_validate(&diag, 550.0f, 1150, PCM_DVFS_PROFILE_ADAPTIVE));
 
     // Corrupted CRC32 or payload byte: must fail validation and reset cleanly
     diag.watchdog_resets = 2;

@@ -34,6 +34,10 @@ bool pcm_get_dvfs_freq_bounds(uint16_t profile, float * min_freq, float * max_fr
             *min_freq = PCM_DVFS_PERFORMANCE_MIN_FREQ_MHZ;
             *max_freq = PCM_DVFS_PERFORMANCE_MAX_FREQ_MHZ;
             return true;
+        case PCM_DVFS_PROFILE_ADAPTIVE:
+            *min_freq = PCM_DVFS_ADAPTIVE_MIN_FREQ_MHZ;
+            *max_freq = PCM_DVFS_ADAPTIVE_MAX_FREQ_MHZ;
+            return true;
         default:
             return false;
     }
@@ -415,6 +419,7 @@ static uint32_t pcm_rtc_diag_compute_crc32(const PcmRtcDiagnostics * diag)
     memcpy(&copy, diag, sizeof(copy));
     copy.crc32 = 0;
     copy.reserved = 0;
+    copy.reserved2 = 0;
     return pcm_crc32_bytes((const uint8_t *) &copy, sizeof(copy));
 }
 
@@ -432,6 +437,7 @@ void pcm_rtc_diag_seal(PcmRtcDiagnostics * diag,
     diag->target_voltage_mv = target_voltage_mv;
     diag->dvfs_profile = dvfs_profile;
     diag->reserved = 0;
+    diag->reserved2 = 0;
     diag->crc32 = 0;
     diag->crc32 = pcm_rtc_diag_compute_crc32(diag);
 }
@@ -441,7 +447,7 @@ bool pcm_rtc_diag_validate(const PcmRtcDiagnostics * diag,
                            uint16_t target_voltage_mv,
                            uint16_t dvfs_profile)
 {
-    if (diag == NULL || diag->magic != PCM_RTC_DIAG_MAGIC || diag->reserved != 0) {
+    if (diag == NULL || diag->magic != PCM_RTC_DIAG_MAGIC || diag->reserved != 0 || diag->reserved2 != 0) {
         return false;
     }
     if (isnan(diag->target_frequency_mhz) || isnan(target_frequency_mhz) ||
@@ -455,6 +461,17 @@ bool pcm_rtc_diag_validate(const PcmRtcDiagnostics * diag,
         return false;
     }
     if (isnan(diag->learned_max_freq_mhz) || diag->learned_max_freq_mhz < 0.0f) {
+        return false;
+    }
+    if (isnan(diag->adaptive_best_freq_mhz) || diag->adaptive_best_freq_mhz < 0.0f ||
+        (diag->adaptive_best_freq_mhz > 0.0f &&
+         (diag->adaptive_best_freq_mhz < PCM_FREQ_MIN_MHZ ||
+          diag->adaptive_best_freq_mhz > PCM_DVFS_ADAPTIVE_MAX_FREQ_MHZ))) {
+        return false;
+    }
+    if (diag->adaptive_best_vcore_mv != 0 &&
+        (diag->adaptive_best_vcore_mv < PCM_VCORE_MIN_MV ||
+         diag->adaptive_best_vcore_mv > PCM_VCORE_MAX_MV)) {
         return false;
     }
 

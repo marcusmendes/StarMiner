@@ -85,8 +85,16 @@ export class SystemComponent implements OnInit, OnDestroy {
       case 1: return 'Efficiency';
       case 2: return 'Balanced';
       case 3: return 'Performance';
+      case 4: return 'Adaptive';
       default: return 'Manual';
     }
+  }
+
+  formatAdaptiveSafePoint(info: ISystemInfo): string {
+    if ((info.adaptiveBestFreq ?? 0) > 0 && (info.adaptiveBestVcore ?? 0) > 0) {
+      return `${info.adaptiveBestFreq} MHz @ ${info.adaptiveBestVcore} mV`;
+    }
+    return 'Learning...';
   }
 
   getSystemRows(data: CombinedData): TableRow[] {
@@ -97,6 +105,10 @@ export class SystemComponent implements OnInit, OnDestroy {
       { label: 'Uptime', value: DateAgoPipe.transform(data.info.uptimeSeconds) },
       { label: 'Reset Reason', value: data.info.resetReason },
       { label: 'DVFS Profile', value: this.formatDvfsProfile(data.info.dvfsProfile) },
+      ...(data.info.dvfsProfile === 4 || ((data.info.adaptiveBestFreq ?? 0) > 0 && (data.info.adaptiveBestVcore ?? 0) > 0)
+        ? [{ label: 'Adaptive Safe Point', value: this.formatAdaptiveSafePoint(data.info) }]
+        : []),
+      { label: 'Pre-Watchdog Recoveries', value: String(data.info.preWatchdogRecoveries ?? 0) },
       { label: 'ASIC Watchdog Resets', value: String(data.info.watchdogResets ?? 0) },
       { label: 'PMBus CML Recoveries', value: String(data.info.cmlErrorCount ?? 0), class: 'pb-3' },
       { label: 'Wi-Fi SSID', value: data.info.ssid, isSensitiveData: true },

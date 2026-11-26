@@ -156,9 +156,12 @@ describe('SwarmComponent', () => {
       expect(component.getDvfsProfileLabel(1)).toBe('Efficiency');
       expect(component.getDvfsProfileLabel(2)).toBe('Balanced');
       expect(component.getDvfsProfileLabel(3)).toBe('Performance');
+      expect(component.getDvfsProfileLabel(4)).toBe('Adaptive');
       expect(component.getLearnedBoundsTooltip(legacyDevice)).toBe('');
       expect(component.getLearnedBoundsTooltip({ learnedMaxFreq: 612.5, learnedMinVcore: 1145 }))
         .toBe('Learned silicon bounds (Max Freq: 612.5 MHz, Min VCore: 1145 mV)');
+      expect(component.getLearnedBoundsTooltip({ adaptiveBestFreq: 587.5, adaptiveBestVcore: 1140, preWatchdogRecoveries: 2 }))
+        .toBe('Learned silicon bounds (Safe Point: 587.5 MHz @ 1140 mV, Pre-WD: 2)');
 
       component.swarm = [legacyDevice];
       component['calculateTotals']();

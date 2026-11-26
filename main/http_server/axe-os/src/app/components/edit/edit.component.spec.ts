@@ -101,14 +101,15 @@ describe('EditComponent', () => {
     expect(fallbackComponent.form.get('dvfsProfile')?.value).toBe(0);
   });
 
-  it('should save dvfsProfile changes (0..3) via updateSystem without requiring restart', () => {
+  it('should save dvfsProfile changes (0..4) via updateSystem without requiring restart and reject > 4', () => {
     const dvfsControl = component.form.get('dvfsProfile')!;
 
-    for (const profile of [0, 1, 2, 3]) {
+    for (const profile of [0, 1, 2, 3, 4]) {
       systemApiSpy.updateSystem.calls.reset();
       dvfsControl.setValue(profile);
       dvfsControl.markAsDirty();
 
+      expect(dvfsControl.valid).toBeTrue();
       expect(component.isRestartRequired).toBeFalse();
 
       component.updateSystem();
@@ -122,5 +123,8 @@ describe('EditComponent', () => {
         })
       );
     }
+
+    dvfsControl.setValue(5);
+    expect(dvfsControl.valid).toBeFalse();
   });
 });

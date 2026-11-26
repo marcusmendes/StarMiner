@@ -62,8 +62,26 @@ describe('SystemComponent', () => {
     });
 
     expect(rows.find(r => r.label === 'DVFS Profile')?.value).toBe('Performance');
+    expect(rows.find(r => r.label === 'Pre-Watchdog Recoveries')?.value).toBe('0');
     expect(rows.find(r => r.label === 'ASIC Watchdog Resets')?.value).toBe('2');
     expect(rows.find(r => r.label === 'PMBus CML Recoveries')?.value).toBe('4');
+  });
+
+  it('should format Adaptive DVFS Profile, Adaptive Safe Point, and Pre-Watchdog Recoveries rows', () => {
+    const adaptiveRows = component.getSystemRows({
+      info: {
+        ...baseInfo,
+        dvfsProfile: 4,
+        adaptiveBestFreq: 587.5,
+        adaptiveBestVcore: 1140,
+        preWatchdogRecoveries: 2,
+      },
+      asic: baseAsic,
+    });
+
+    expect(adaptiveRows.find(r => r.label === 'DVFS Profile')?.value).toBe('Adaptive');
+    expect(adaptiveRows.find(r => r.label === 'Adaptive Safe Point')?.value).toBe('587.5 MHz @ 1140 mV');
+    expect(adaptiveRows.find(r => r.label === 'Pre-Watchdog Recoveries')?.value).toBe('2');
   });
 
   it('should format Balanced and Manual DVFS Profile rows and default missing counters to 0', () => {

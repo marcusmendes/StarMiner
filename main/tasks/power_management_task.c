@@ -1,6 +1,9 @@
 #include <math.h>
+#include <stdlib.h>
 #include "esp_attr.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_psram.h"
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -16,6 +19,7 @@
 #include "asic_reset.h"
 #include "driver/uart.h"
 #include "power_control_math.h"
+#include "dvfs_bandit.h"
 
 #define POLL_RATE 100
 
@@ -65,11 +69,27 @@ typedef enum {
     DVFS_PROFILE_EFFICIENCY = PCM_DVFS_PROFILE_EFFICIENCY,
     DVFS_PROFILE_BALANCED = PCM_DVFS_PROFILE_BALANCED,
     DVFS_PROFILE_PERFORMANCE = PCM_DVFS_PROFILE_PERFORMANCE,
+    DVFS_PROFILE_ADAPTIVE = PCM_DVFS_PROFILE_ADAPTIVE,
 } DvfsProfile;
 
 static const char * TAG = "power_management";
 
 static RTC_NOINIT_ATTR PcmRtcDiagnostics s_rtc_diag;
+static DvfsBanditState * s_bandit_state = NULL;
+
+static DvfsBanditState * ensure_bandit_state_allocated(void)
+{
+    if (s_bandit_state != NULL) {
+        return s_bandit_state;
+    }
+    if (esp_psram_is_initialized()) {
+        s_bandit_state = heap_caps_malloc(sizeof(DvfsBanditState), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    }
+    if (s_bandit_state == NULL) {
+        s_bandit_state = malloc(sizeof(DvfsBanditState));
+    }
+    return s_bandit_state;
+}
 
 static void sync_rtc_diagnostics(const PowerManagementModule * power_management)
 {
@@ -78,6 +98,8 @@ static void sync_rtc_diagnostics(const PowerManagementModule * power_management)
     s_rtc_diag.last_watchdog_reason = power_management->last_watchdog_reason;
     s_rtc_diag.learned_max_freq_mhz = power_management->learned_max_freq_mhz;
     s_rtc_diag.learned_min_vcore_mv = power_management->learned_min_vcore_mv;
+    s_rtc_diag.adaptive_best_freq_mhz = power_management->adaptive_best_freq_mhz;
+    s_rtc_diag.adaptive_best_vcore_mv = power_management->adaptive_best_vcore_mv;
     pcm_rtc_diag_seal(&s_rtc_diag,
                       power_management->target_frequency,
                       power_management->target_voltage,
@@ -161,7 +183,16 @@ static void reset_dvfs_state(PowerManagementModule * power_management, int64_t n
     power_management->dvfs_voltage_offset_mv = 0;
     power_management->learned_max_freq_mhz = 0.0f;
     power_management->learned_min_vcore_mv = 0;
+    power_management->adaptive_best_freq_mhz = 0.0f;
+    power_management->adaptive_best_vcore_mv = 0;
     power_management->last_dvfs_step_us = now_us;
+    if (s_bandit_state != NULL) {
+        dvfs_bandit_init(s_bandit_state,
+                         power_management->target_frequency,
+                         power_management->target_voltage,
+                         0.0f,
+                         0);
+    }
 }
 
 static void reset_vdroop_state(PowerManagementModule * power_management)
@@ -296,15 +327,49 @@ static void handle_asic_watchdog(GlobalState * GLOBAL_STATE)
         return;
     }
 
-    pcm_dvfs_apply_watchdog_event(power_management->dvfs_profile,
-                                  power_management->watchdog_consecutive_failures,
-                                  power_management->target_frequency,
-                                  power_management->target_voltage,
-                                  &power_management->dvfs_freq_offset_mhz,
-                                  &power_management->dvfs_voltage_offset_mv,
-                                  &power_management->watchdog_freq_offset_mhz,
-                                  &power_management->learned_max_freq_mhz,
-                                  &power_management->learned_min_vcore_mv);
+    if (power_management->dvfs_profile == DVFS_PROFILE_ADAPTIVE) {
+        DvfsBanditState * bandit = ensure_bandit_state_allocated();
+        if (bandit != NULL) {
+            float rb_freq = get_dvfs_base_target_freq(power_management);
+            uint16_t rb_vcore = get_dvfs_base_target_voltage_mv(power_management);
+            dvfs_bandit_record_fault_and_rollback(bandit, true, &rb_freq, &rb_vcore);
+            power_management->dvfs_freq_offset_mhz = rb_freq - power_management->target_frequency;
+            power_management->dvfs_voltage_offset_mv = (int16_t) ((int32_t) rb_vcore - (int32_t) power_management->target_voltage);
+            power_management->adaptive_best_freq_mhz = bandit->best_safe_freq_mhz;
+            power_management->adaptive_best_vcore_mv = bandit->best_safe_vcore_mv;
+            if (power_management->watchdog_consecutive_failures >= 2 && rb_freq <= (DVFS_BANDIT_FREQ_MIN_MHZ + 0.001f)) {
+                pcm_dvfs_apply_watchdog_event(PCM_DVFS_PROFILE_MANUAL,
+                                              power_management->watchdog_consecutive_failures,
+                                              rb_freq,
+                                              rb_vcore,
+                                              NULL,
+                                              NULL,
+                                              &power_management->watchdog_freq_offset_mhz,
+                                              NULL,
+                                              NULL);
+            }
+        } else {
+            pcm_dvfs_apply_watchdog_event(power_management->dvfs_profile,
+                                          power_management->watchdog_consecutive_failures,
+                                          power_management->target_frequency,
+                                          power_management->target_voltage,
+                                          &power_management->dvfs_freq_offset_mhz,
+                                          &power_management->dvfs_voltage_offset_mv,
+                                          &power_management->watchdog_freq_offset_mhz,
+                                          &power_management->learned_max_freq_mhz,
+                                          &power_management->learned_min_vcore_mv);
+        }
+    } else {
+        pcm_dvfs_apply_watchdog_event(power_management->dvfs_profile,
+                                      power_management->watchdog_consecutive_failures,
+                                      power_management->target_frequency,
+                                      power_management->target_voltage,
+                                      &power_management->dvfs_freq_offset_mhz,
+                                      &power_management->dvfs_voltage_offset_mv,
+                                      &power_management->watchdog_freq_offset_mhz,
+                                      &power_management->learned_max_freq_mhz,
+                                      &power_management->learned_min_vcore_mv);
+    }
 
     float effective_freq = get_effective_frequency_mhz(power_management);
     uint16_t effective_vcore = get_effective_voltage_mv(power_management);
@@ -342,7 +407,7 @@ void POWER_MANAGEMENT_init_frequency(void * pvParameters)
     uint16_t dvfs_profile = GLOBAL_STATE->SELF_TEST_MODULE.is_active
                                 ? DVFS_PROFILE_MANUAL
                                 : nvs_config_get_u16(NVS_CONFIG_DVFS_PROFILE);
-    if (dvfs_profile > DVFS_PROFILE_PERFORMANCE) {
+    if (dvfs_profile > DVFS_PROFILE_ADAPTIVE) {
         dvfs_profile = DVFS_PROFILE_MANUAL;
     }
     power_management->target_frequency = nvs_freq;
@@ -494,6 +559,37 @@ static void handle_dvfs_autotuner(GlobalState * GLOBAL_STATE)
                                       vr_for_dvfs,
                                       power);
             break;
+        case DVFS_PROFILE_ADAPTIVE: {
+            DvfsBanditState * bandit = ensure_bandit_state_allocated();
+            if (bandit != NULL) {
+                float prev_best_freq = power_management->adaptive_best_freq_mhz;
+                uint16_t prev_best_mv = power_management->adaptive_best_vcore_mv;
+                float next_bandit_freq = get_dvfs_base_target_freq(power_management);
+                uint16_t next_bandit_mv = get_dvfs_base_target_voltage_mv(power_management);
+                float active_hr = (sys_module->hashrate_1m > 0.0f) ? sys_module->hashrate_1m : sys_module->current_hashrate;
+                DvfsBanditSample sample = {
+                    .hashrate_ghs = active_hr,
+                    .error_percentage = err_pct,
+                    .power_w = power,
+                    .chip_temp_c = chip_temp,
+                    .vr_temp_c = vr_for_dvfs,
+                };
+                dvfs_bandit_step(bandit, &sample,
+                                 &next_bandit_freq, &next_bandit_mv,
+                                 &power_management->adaptive_best_freq_mhz,
+                                 &power_management->adaptive_best_vcore_mv);
+                power_management->dvfs_freq_offset_mhz = next_bandit_freq - power_management->target_frequency;
+                power_management->dvfs_voltage_offset_mv = (int16_t) ((int32_t) next_bandit_mv - (int32_t) power_management->target_voltage);
+                if (power_management->adaptive_best_vcore_mv != prev_best_mv ||
+                    fabsf(power_management->adaptive_best_freq_mhz - prev_best_freq) > 0.001f) {
+                    ESP_LOGI(TAG, "Adaptive 2D Bandit updated safe point -> %.1f MHz / %u mV",
+                             power_management->adaptive_best_freq_mhz,
+                             power_management->adaptive_best_vcore_mv);
+                    sync_rtc_diagnostics(power_management);
+                }
+            }
+            break;
+        }
         default:
             break;
     }
@@ -604,6 +700,37 @@ static void handle_pre_watchdog(GlobalState * GLOBAL_STATE)
     float vr_for_relief = is_vr_temp_valid(GLOBAL_STATE, power_management->vr_temp)
                               ? fmaxf(0.0f, power_management->vr_temp)
                               : NAN;
+
+    if (power_management->dvfs_profile == DVFS_PROFILE_ADAPTIVE) {
+        DvfsBanditState * bandit = ensure_bandit_state_allocated();
+        if (bandit != NULL) {
+            float rb_freq = get_dvfs_base_target_freq(power_management);
+            uint16_t rb_vcore = get_dvfs_base_target_voltage_mv(power_management);
+            dvfs_bandit_record_fault_and_rollback(bandit, false, &rb_freq, &rb_vcore);
+            power_management->dvfs_freq_offset_mhz = rb_freq - power_management->target_frequency;
+            power_management->dvfs_voltage_offset_mv = (int16_t) ((int32_t) rb_vcore - (int32_t) power_management->target_voltage);
+            power_management->adaptive_best_freq_mhz = bandit->best_safe_freq_mhz;
+            power_management->adaptive_best_vcore_mv = bandit->best_safe_vcore_mv;
+            power_management->pre_watchdog_recoveries++;
+            power_management->last_pre_watchdog_action_us = now_us;
+            power_management->last_dvfs_step_us = now_us;
+
+            float effective_freq = get_effective_frequency_mhz(power_management);
+            uint16_t effective_vcore = get_effective_voltage_mv(power_management);
+            ESP_LOGW(TAG,
+                     "ASIC Pre-Watchdog Adaptive rollback #%lu: ASIC %u domain %u (CUSUM: %.2f) -> %.1f MHz / %u mV (safe point: %.1f MHz / %u mV)",
+                     (unsigned long) power_management->pre_watchdog_recoveries,
+                     power_management->pre_watchdog_asic,
+                     power_management->pre_watchdog_domain,
+                     power_management->pre_watchdog_cusum_max,
+                     effective_freq,
+                     effective_vcore,
+                     power_management->adaptive_best_freq_mhz,
+                     power_management->adaptive_best_vcore_mv);
+            sync_rtc_diagnostics(power_management);
+            return;
+        }
+    }
 
     PcmPreWatchdogAction action = pcm_pre_watchdog_apply_relief(power_management->dvfs_profile,
                                                                 power_management->target_frequency,
@@ -860,13 +987,17 @@ void POWER_MANAGEMENT_task(void * pvParameters)
         power_management->watchdog_trigger_reason = PCM_WATCHDOG_REASON_NONE;
         power_management->learned_max_freq_mhz = s_rtc_diag.learned_max_freq_mhz;
         power_management->learned_min_vcore_mv = s_rtc_diag.learned_min_vcore_mv;
+        power_management->adaptive_best_freq_mhz = s_rtc_diag.adaptive_best_freq_mhz;
+        power_management->adaptive_best_vcore_mv = s_rtc_diag.adaptive_best_vcore_mv;
         ESP_LOGI(TAG,
-                 "Restored RTC diagnostics after warm reset: watchdog_resets=%lu, last_reason=%u, cml_errors=%lu, learned_max_freq=%.1f MHz, learned_min_vcore=%u mV",
+                 "Restored RTC diagnostics after warm reset: watchdog_resets=%lu, last_reason=%u, cml_errors=%lu, learned_max_freq=%.1f MHz, learned_min_vcore=%u mV, adaptive_best=%.1f MHz/%u mV",
                  (unsigned long) power_management->watchdog_resets,
                  power_management->last_watchdog_reason,
                  (unsigned long) power_management->cml_error_count,
                  power_management->learned_max_freq_mhz,
-                 power_management->learned_min_vcore_mv);
+                 power_management->learned_min_vcore_mv,
+                 power_management->adaptive_best_freq_mhz,
+                 power_management->adaptive_best_vcore_mv);
     } else {
         power_management->watchdog_resets = 0;
         power_management->cml_error_count = 0;
@@ -874,6 +1005,21 @@ void POWER_MANAGEMENT_task(void * pvParameters)
         power_management->watchdog_trigger_reason = PCM_WATCHDOG_REASON_NONE;
         power_management->learned_max_freq_mhz = 0.0f;
         power_management->learned_min_vcore_mv = 0;
+        power_management->adaptive_best_freq_mhz = 0.0f;
+        power_management->adaptive_best_vcore_mv = 0;
+    }
+
+    DvfsBanditState * bandit = ensure_bandit_state_allocated();
+    if (bandit != NULL) {
+        dvfs_bandit_init(bandit,
+                         power_management->target_frequency,
+                         power_management->target_voltage,
+                         power_management->adaptive_best_freq_mhz,
+                         power_management->adaptive_best_vcore_mv);
+        if (power_management->dvfs_profile == DVFS_PROFILE_ADAPTIVE) {
+            power_management->dvfs_freq_offset_mhz = dvfs_bandit_idx_to_freq(bandit->cur_freq_idx) - power_management->target_frequency;
+            power_management->dvfs_voltage_offset_mv = (int16_t) ((int32_t) dvfs_bandit_idx_to_vcore(bandit->cur_vcore_idx) - (int32_t) power_management->target_voltage);
+        }
     }
 
     float last_nvs_asic_frequency = power_management->target_frequency;
@@ -913,7 +1059,7 @@ void POWER_MANAGEMENT_task(void * pvParameters)
         uint16_t raw_dvfs_profile = GLOBAL_STATE->SELF_TEST_MODULE.is_active
                                         ? DVFS_PROFILE_MANUAL
                                         : nvs_config_get_u16(NVS_CONFIG_DVFS_PROFILE);
-        if (raw_dvfs_profile > DVFS_PROFILE_PERFORMANCE) {
+        if (raw_dvfs_profile > DVFS_PROFILE_ADAPTIVE) {
             raw_dvfs_profile = DVFS_PROFILE_MANUAL;
         }
         power_management->target_voltage = raw_target_voltage;
@@ -981,7 +1127,8 @@ void POWER_MANAGEMENT_task(void * pvParameters)
         } else {
             power_management->pre_watchdog_trigger = false;
             reset_dvfs_state(power_management, esp_timer_get_time());
-            if (s_rtc_diag.learned_max_freq_mhz != 0.0f || s_rtc_diag.learned_min_vcore_mv != 0) {
+            if (s_rtc_diag.learned_max_freq_mhz != 0.0f || s_rtc_diag.learned_min_vcore_mv != 0 ||
+                s_rtc_diag.adaptive_best_freq_mhz != 0.0f || s_rtc_diag.adaptive_best_vcore_mv != 0) {
                 sync_rtc_diagnostics(power_management);
             }
         }

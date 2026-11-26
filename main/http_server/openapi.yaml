@@ -231,6 +231,9 @@ components:
         - lastWatchdogReason
         - learnedMaxFreq
         - learnedMinVcore
+        - preWatchdogRecoveries
+        - adaptiveBestFreq
+        - adaptiveBestVcore
       properties:
         ASICModel:
           type: string
@@ -587,8 +590,8 @@ components:
         dvfsProfile:
           type: integer
           minimum: 0
-          maximum: 3
-          description: Active DVFS auto-tuner profile (0=Manual, 1=Efficiency, 2=Balanced, 3=Performance)
+          maximum: 4
+          description: Active DVFS auto-tuner profile (0=Manual, 1=Efficiency, 2=Balanced, 3=Performance, 4=Adaptive)
         cmlErrorCount:
           type: integer
           description: Number of recovered TPS546 STATUS_CML communication faults
@@ -606,6 +609,15 @@ components:
         learnedMinVcore:
           type: integer
           description: Per-chip DVFS learned minimum VCore floor in mV (0=unlocked)
+        preWatchdogRecoveries:
+          type: integer
+          description: Number of domain CUSUM pre-watchdog hot recoveries in current session
+        adaptiveBestFreq:
+          type: number
+          description: Proven safe adaptive DVFS frequency in MHz (0=not yet locked)
+        adaptiveBestVcore:
+          type: integer
+          description: Proven safe adaptive DVFS core voltage in mV (0=not yet locked)
 
     SystemASIC:
       type: object
@@ -852,9 +864,9 @@ components:
             - 450
         dvfsProfile:
           type: integer
-          description: DVFS auto-tuner profile (0=Manual, 1=Efficiency, 2=Balanced, 3=Performance)
+          description: DVFS auto-tuner profile (0=Manual, 1=Efficiency, 2=Balanced, 3=Performance, 4=Adaptive)
           minimum: 0
-          maximum: 3
+          maximum: 4
           examples:
             - 0
         rotation:

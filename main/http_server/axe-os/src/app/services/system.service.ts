@@ -178,6 +178,9 @@ export class SystemApiService {
         lastWatchdogReason: 0,
         learnedMaxFreq: 0,
         learnedMinVcore: 0,
+        preWatchdogRecoveries: 0,
+        adaptiveBestFreq: 0,
+        adaptiveBestVcore: 0,
       }
     ).pipe(delay(1000));
   }

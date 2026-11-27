@@ -2,6 +2,7 @@
 #define POWER_CONTROL_MATH_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -298,6 +299,34 @@ PcmPreWatchdogAction pcm_pre_watchdog_apply_relief(uint16_t profile,
                                                    float * watchdog_freq_offset_mhz,
                                                    float * learned_max_freq_mhz,
                                                    uint16_t * learned_min_vcore_mv);
+
+#define PCM_PMBUS_STATUS_OFF                0x0040U
+#define PCM_PMBUS_STATUS_VOUT_OV            0x0020U
+#define PCM_PMBUS_STATUS_IOUT_OC            0x0010U
+#define PCM_PMBUS_STATUS_VIN_UV             0x0008U
+#define PCM_PMBUS_STATUS_TEMP               0x0004U
+#define PCM_PMBUS_FAULT_MASK                (PCM_PMBUS_STATUS_OFF | PCM_PMBUS_STATUS_VOUT_OV | \
+                                             PCM_PMBUS_STATUS_IOUT_OC | PCM_PMBUS_STATUS_VIN_UV | \
+                                             PCM_PMBUS_STATUS_TEMP)
+#define PCM_PMBUS_MAX_AUTOCLEARS_IN_WINDOW  3U
+#define PCM_PMBUS_AUTOCLEAR_WINDOW_US       (300LL * 1000000LL)
+
+typedef struct {
+    int64_t clear_timestamps_us[PCM_PMBUS_MAX_AUTOCLEARS_IN_WINDOW];
+    uint8_t clear_count;
+    uint32_t total_transient_clears;
+} PcmPowerFaultTracker;
+
+void pcm_power_fault_tracker_init(PcmPowerFaultTracker * tracker);
+
+bool pcm_pmbus_try_consume_autoclear(PcmPowerFaultTracker * tracker,
+                                     uint16_t status_word,
+                                     int64_t now_us);
+
+void pcm_pmbus_format_fault_message(uint16_t status_word,
+                                    bool repeated,
+                                    char * out_buf,
+                                    size_t out_len);
 
 #ifdef __cplusplus
 }

@@ -2,6 +2,7 @@
 
 #include <math.h>
 #include <stddef.h>
+#include <stdio.h>
 #include <string.h>
 
 uint16_t pcm_clamp_vcore_mv(int32_t voltage_mv)
@@ -651,4 +652,94 @@ PcmPreWatchdogAction pcm_pre_watchdog_apply_relief(uint16_t profile,
         return PCM_PRE_WATCHDOG_ACTION_FREQ_STEP_DOWN;
     }
     return PCM_PRE_WATCHDOG_ACTION_NONE;
+}
+
+void pcm_power_fault_tracker_init(PcmPowerFaultTracker * tracker)
+{
+    if (tracker == NULL) {
+        return;
+    }
+    memset(tracker, 0, sizeof(*tracker));
+}
+
+bool pcm_pmbus_try_consume_autoclear(PcmPowerFaultTracker * tracker,
+                                     uint16_t status_word,
+                                     int64_t now_us)
+{
+    if (tracker == NULL) {
+        return false;
+    }
+    if ((status_word & PCM_PMBUS_FAULT_MASK) == 0U) {
+        return false;
+    }
+    if ((status_word & PCM_PMBUS_STATUS_OFF) != 0U) {
+        return false;
+    }
+
+    uint8_t kept = 0;
+    for (uint8_t i = 0; i < tracker->clear_count && i < PCM_PMBUS_MAX_AUTOCLEARS_IN_WINDOW; i++) {
+        int64_t ts = tracker->clear_timestamps_us[i];
+        if (now_us < ts || (now_us - ts) < PCM_PMBUS_AUTOCLEAR_WINDOW_US) {
+            tracker->clear_timestamps_us[kept++] = ts;
+        }
+    }
+    tracker->clear_count = kept;
+
+    if (tracker->clear_count >= PCM_PMBUS_MAX_AUTOCLEARS_IN_WINDOW) {
+        return false;
+    }
+
+    tracker->clear_timestamps_us[tracker->clear_count++] = now_us;
+    tracker->total_transient_clears++;
+    return true;
+}
+
+void pcm_pmbus_format_fault_message(uint16_t status_word,
+                                    bool repeated,
+                                    char * out_buf,
+                                    size_t out_len)
+{
+    if (out_buf == NULL || out_len == 0) {
+        return;
+    }
+
+    typedef struct {
+        uint16_t bit;
+        const char * label;
+    } FaultFlag;
+
+    static const FaultFlag kFlags[] = {
+        { PCM_PMBUS_STATUS_OFF,     "OFF" },
+        { PCM_PMBUS_STATUS_VOUT_OV, "VOUT_OV" },
+        { PCM_PMBUS_STATUS_IOUT_OC, "IOUT_OC" },
+        { PCM_PMBUS_STATUS_VIN_UV,  "VIN_UV" },
+        { PCM_PMBUS_STATUS_TEMP,    "TEMP" },
+    };
+
+    char flags[64] = {0};
+    size_t pos = 0;
+    for (size_t i = 0; i < sizeof(kFlags) / sizeof(kFlags[0]); i++) {
+        if ((status_word & kFlags[i].bit) != 0U) {
+            if (pos > 0 && pos + 2 < sizeof(flags)) {
+                flags[pos++] = ',';
+                flags[pos++] = ' ';
+            }
+            size_t len = strlen(kFlags[i].label);
+            if (pos + len < sizeof(flags)) {
+                memcpy(flags + pos, kFlags[i].label, len);
+                pos += len;
+            }
+            flags[pos] = '\0';
+        }
+    }
+
+    if (pos == 0) {
+        snprintf(out_buf, out_len, "Power Fault Detected.");
+        return;
+    }
+
+    snprintf(out_buf, out_len, "%sPower Fault (0x%04X: %s).",
+             repeated ? "Repeated " : "",
+             (unsigned int)status_word,
+             flags);
 }

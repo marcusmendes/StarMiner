@@ -10,6 +10,7 @@
 #include "pmbus_commands.h"
 
 #include "i2c_bitaxe.h"
+#include "power_control_math.h"
 #include "TPS546.h"
 
 //#define DEBUG_TPS546_MEAS 1 //uncomment to debug TPS546 measurements
@@ -35,6 +36,8 @@ static uint8_t DEVICE_ID_TPS546D24S[] = {0x54, 0x49, 0x54, 0x6D, 0x24, 0x62};
 static i2c_master_dev_handle_t tps546_i2c_handle;
 
 static TPS546_CONFIG tps546_config;
+static PcmPowerFaultTracker s_fault_tracker;
+static char tps_error_message[256] = "Power Fault Detected.";
 
 // Cached values to handle I2C failures robustly
 static float last_vin = 0.0f;
@@ -351,6 +354,8 @@ esp_err_t TPS546_init(TPS546_CONFIG config)
     tps546_config = config;
     s_vout_mode_cached = false;
     s_last_vout_read_us = 0;
+    pcm_power_fault_tracker_init(&s_fault_tracker);
+    snprintf(tps_error_message, sizeof(tps_error_message), "Power Fault Detected.");
 
     ESP_LOGI(TAG, "Initializing the core voltage regulator");
     ESP_RETURN_ON_ERROR(i2c_bitaxe_add_device(TPS546_I2CADDR, &tps546_i2c_handle, TAG), TAG, "Failed to add TPS546 I2C");
@@ -802,10 +807,42 @@ esp_err_t TPS546_check_status(GlobalState * GLOBAL_STATE) {
 
     ESP_RETURN_ON_ERROR(smb_read_word(PMBUS_STATUS_WORD, &status), TAG, "Failed to read STATUS_WORD");
     //determine if this is a fault we care about
-    if (status & (TPS546_STATUS_OFF | TPS546_STATUS_VOUT_OV | TPS546_STATUS_IOUT_OC | TPS546_STATUS_VIN_UV | TPS546_STATUS_TEMP)) {
+    if (status & PCM_PMBUS_FAULT_MASK) {
         if (SYSTEM_MODULE->power_fault == 0) {
-            ESP_RETURN_ON_ERROR(TPS546_parse_status(status), TAG, "Failed to parse STATUS_WORD");
-            SYSTEM_MODULE->power_fault = 1;
+            if (TPS546_parse_status(status) != ESP_OK) {
+                ESP_LOGW(TAG, "Partial PMBus status parse failure for STATUS_WORD=0x%04X", status);
+            }
+
+            if (pcm_pmbus_try_consume_autoclear(&s_fault_tracker, status, esp_timer_get_time())) {
+                pcm_pmbus_format_fault_message(status, false, tps_error_message, sizeof(tps_error_message));
+                ESP_LOGW(TAG, "%s Regulator ON — attempting CLEAR_FAULTS re-check (%u/%u in 5m)",
+                         tps_error_message,
+                         (unsigned int)s_fault_tracker.clear_count,
+                         (unsigned int)PCM_PMBUS_MAX_AUTOCLEARS_IN_WINDOW);
+
+                TPS546_clear_faults();
+                vTaskDelay(pdMS_TO_TICKS(10));
+
+                uint16_t recheck = 0;
+                esp_err_t recheck_err = smb_read_word(PMBUS_STATUS_WORD, &recheck);
+                if (recheck_err == ESP_OK && (recheck & PCM_PMBUS_FAULT_MASK) == 0) {
+                    ESP_LOGW(TAG, "TPS546 transient fault 0x%04X cleared cleanly (post-clear=0x%04X, total=%lu)",
+                             status, recheck, (unsigned long)s_fault_tracker.total_transient_clears);
+                    snprintf(tps_error_message, sizeof(tps_error_message), "Power Fault Detected.");
+                    SYSTEM_MODULE->power_fault = 0;
+                    return ESP_OK;
+                }
+
+                uint16_t active_status = (recheck_err == ESP_OK) ? recheck : status;
+                pcm_pmbus_format_fault_message(active_status, false, tps_error_message, sizeof(tps_error_message));
+                ESP_LOGE(TAG, "TPS546 fault persists after CLEAR_FAULTS: %s", tps_error_message);
+                SYSTEM_MODULE->power_fault = 1;
+            } else {
+                bool repeated = !(status & PCM_PMBUS_STATUS_OFF);
+                pcm_pmbus_format_fault_message(status, repeated, tps_error_message, sizeof(tps_error_message));
+                ESP_LOGE(TAG, "Latching TPS546 fault: %s", tps_error_message);
+                SYSTEM_MODULE->power_fault = 1;
+            }
         }
     } else {
         SYSTEM_MODULE->power_fault = 0;
@@ -828,9 +865,7 @@ esp_err_t TPS546_check_status(GlobalState * GLOBAL_STATE) {
     return ESP_OK;
 }
 
-// Global variable to store the TPS error message for the UI
-static char tps_error_message[256] = "Power Fault Detected.";
-
+// Get the current TPS error message
 const char* TPS546_get_error_message() {
     return tps_error_message;
 }

@@ -669,3 +669,44 @@ TEST_CASE("Pre-watchdog hot relief respects DVFS profiles 0..3 and hardware caps
     TEST_ASSERT_EQUAL_INT(PCM_PRE_WATCHDOG_ACTION_NONE, action);
     TEST_ASSERT_FLOAT_WITHIN(0.001f, 15.0f, wd_freq_off);
 }
+
+TEST_CASE("PMBus fault message formatting and transient auto-clear rate limiting", "[power_control][pmbus]")
+{
+    char msg[256];
+
+    pcm_pmbus_format_fault_message(0x0000, false, msg, sizeof(msg));
+    TEST_ASSERT_EQUAL_STRING("Power Fault Detected.", msg);
+
+    pcm_pmbus_format_fault_message(PCM_PMBUS_STATUS_VIN_UV, false, msg, sizeof(msg));
+    TEST_ASSERT_EQUAL_STRING("Power Fault (0x0008: VIN_UV).", msg);
+
+    pcm_pmbus_format_fault_message(PCM_PMBUS_STATUS_IOUT_OC | PCM_PMBUS_STATUS_TEMP, false, msg, sizeof(msg));
+    TEST_ASSERT_EQUAL_STRING("Power Fault (0x0014: IOUT_OC, TEMP).", msg);
+
+    pcm_pmbus_format_fault_message(PCM_PMBUS_STATUS_VIN_UV, true, msg, sizeof(msg));
+    TEST_ASSERT_EQUAL_STRING("Repeated Power Fault (0x0008: VIN_UV).", msg);
+
+    pcm_pmbus_format_fault_message(PCM_PMBUS_STATUS_OFF | PCM_PMBUS_STATUS_VOUT_OV, false, msg, sizeof(msg));
+    TEST_ASSERT_EQUAL_STRING("Power Fault (0x0060: OFF, VOUT_OV).", msg);
+
+    PcmPowerFaultTracker tracker;
+    pcm_power_fault_tracker_init(&tracker);
+
+    // Must NOT auto-clear if regulator is OFF
+    TEST_ASSERT_FALSE(pcm_pmbus_try_consume_autoclear(&tracker, PCM_PMBUS_STATUS_OFF | PCM_PMBUS_STATUS_VIN_UV, 10000000LL));
+    TEST_ASSERT_EQUAL_UINT32(0, tracker.total_transient_clears);
+
+    // Up to 3 transient clears allowed within 300 s window
+    TEST_ASSERT_TRUE(pcm_pmbus_try_consume_autoclear(&tracker, PCM_PMBUS_STATUS_VIN_UV, 10LL * 1000000LL));
+    TEST_ASSERT_TRUE(pcm_pmbus_try_consume_autoclear(&tracker, PCM_PMBUS_STATUS_IOUT_OC, 60LL * 1000000LL));
+    TEST_ASSERT_TRUE(pcm_pmbus_try_consume_autoclear(&tracker, PCM_PMBUS_STATUS_VIN_UV, 120LL * 1000000LL));
+    TEST_ASSERT_EQUAL_UINT32(3, tracker.total_transient_clears);
+
+    // 4th fault within the 5-minute window is rate-limited
+    TEST_ASSERT_FALSE(pcm_pmbus_try_consume_autoclear(&tracker, PCM_PMBUS_STATUS_VIN_UV, 200LL * 1000000LL));
+    TEST_ASSERT_EQUAL_UINT32(3, tracker.total_transient_clears);
+
+    // After first entry ages past 300 s (10 + 301 = 311 s), sliding window opens a slot again
+    TEST_ASSERT_TRUE(pcm_pmbus_try_consume_autoclear(&tracker, PCM_PMBUS_STATUS_VIN_UV, 311LL * 1000000LL));
+    TEST_ASSERT_EQUAL_UINT32(4, tracker.total_transient_clears);
+}

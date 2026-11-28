@@ -186,6 +186,8 @@ export class SystemApiService {
         vdroopOffsetMv: 0,
         dvfsProfile: 0,
         cmlErrorCount: 0,
+        vrmHiccupCount: 0,
+        lastVrmHiccupStatus: 0,
         watchdogResets: 0,
         lastWatchdogReason: 0,
         learnedMaxFreq: 0,
@@ -318,6 +320,18 @@ export class SystemApiService {
     }
 
     return of({ message: 'Block found notification dismissed (mock)' });
+  }
+
+  public clearPowerFault(uri: string = ''): Observable<any> {
+    if (environment.production && this.api && !uri) {
+      return from(this.api.invoke(functions.clearPowerFault, {}) as Promise<any>);
+    }
+
+    if (environment.production && uri) {
+      return this.httpClient.post<any>(`${uri}/api/system/powerFault/clear`, {});
+    }
+
+    return of({ cleared: true, message: 'Power fault cleared (mock)' });
   }
 
   public pauseMining(uri: string = ''): Observable<GenericResponse> {

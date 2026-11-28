@@ -31,6 +31,7 @@
 #include "global_state.h"
 #include "nvs_config.h"
 #include "system.h"
+#include "vcore.h"
 #include "connect.h"
 #include "statistics_task.h"
 #include "theme_api.h"
@@ -984,6 +985,46 @@ static esp_err_t POST_dismiss_block_found(httpd_req_t * req)
     return res;
 }
 
+static esp_err_t POST_clear_power_fault(httpd_req_t * req)
+{
+    if (is_network_allowed(req) != ESP_OK) {
+        return httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+    }
+
+    if (set_cors_headers(req) != ESP_OK) {
+        httpd_resp_send_500(req);
+        return ESP_OK;
+    }
+
+    esp_err_t err = VCORE_clear_fault(GLOBAL_STATE);
+    bool cleared = (err == ESP_OK);
+
+    httpd_resp_set_type(req, "application/json");
+    if (!cleared) {
+        httpd_resp_set_status(req, "409 Conflict");
+    }
+
+    cJSON * root = cJSON_CreateObject();
+    if (root == NULL) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Memory allocation failed");
+        return ESP_OK;
+    }
+
+    cJSON_AddBoolToObject(root, "cleared", cleared);
+    if (GLOBAL_STATE->SYSTEM_MODULE.power_fault > 0) {
+        const char * fault_str = VCORE_get_fault_string(GLOBAL_STATE);
+        if (fault_str != NULL) {
+            cJSON_AddStringToObject(root, "power_fault", fault_str);
+        }
+    }
+    cJSON_AddStringToObject(root, "message",
+                            cleared ? "Power fault cleared" : "Power fault still active - check hardware/power supply");
+
+    esp_err_t res = HTTP_send_json(req, root, &api_common_prebuffer_len);
+    cJSON_Delete(root);
+    return res;
+}
+
 static esp_err_t POST_mining_pause(httpd_req_t * req)
 {
     if (is_network_allowed(req) != ESP_OK) {
@@ -1552,6 +1593,14 @@ esp_err_t start_rest_server(void * pvParameters)
         .user_ctx = NULL
     };
     httpd_register_uri_handler(server, &system_dismiss_block_found_uri);
+
+    httpd_uri_t system_clear_power_fault_uri = {
+        .uri = "/api/system/powerFault/clear",
+        .method = HTTP_POST,
+        .handler = POST_clear_power_fault,
+        .user_ctx = NULL
+    };
+    httpd_register_uri_handler(server, &system_clear_power_fault_uri);
 
     httpd_uri_t update_system_settings_uri = {
         .uri = "/api/system", 

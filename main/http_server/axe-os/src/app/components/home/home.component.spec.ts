@@ -239,5 +239,30 @@ describe('HomeComponent', () => {
       expect(component.messages.find(m => m.type === 'NO_MINING_REWARD')).toBeUndefined();
       expect(component.messages.find(m => m.type === 'NOT_SOLO_MINING')).toBeUndefined();
     });
+
+    it('should show VRM_HICCUP warning when recovered without power_fault, suppress when power_fault active, and call clearPowerFault()', () => {
+      component.handleSystemMessages(
+        { ...baseSystemInfo, vrmHiccupCount: 1, lastVrmHiccupStatus: 0xC861, power_fault: undefined },
+        { duration: 0, startTime: null }
+      );
+
+      const hiccupMsg = component.messages.find(m => m.type === 'VRM_HICCUP');
+      expect(hiccupMsg).toBeDefined();
+      expect(hiccupMsg?.severity).toBe('warn');
+      expect(hiccupMsg?.text).toContain('1x');
+      expect(hiccupMsg?.text).toContain('0xC861');
+
+      component.handleSystemMessages(
+        { ...baseSystemInfo, vrmHiccupCount: 1, lastVrmHiccupStatus: 0xC861, power_fault: 'Power Fault (0xC861: OFF, VOUT_OV).' },
+        { duration: 0, startTime: null }
+      );
+      expect(component.messages.find(m => m.type === 'VRM_HICCUP')).toBeUndefined();
+      expect(component.messages.find(m => m.type === 'POWER_FAULT')).toBeDefined();
+
+      const sysService = TestBed.inject(SystemApiService);
+      const spy = spyOn(sysService, 'clearPowerFault').and.callThrough();
+      component.clearPowerFault();
+      expect(spy).toHaveBeenCalled();
+    });
   });
 });

@@ -710,3 +710,78 @@ TEST_CASE("PMBus fault message formatting and transient auto-clear rate limiting
     TEST_ASSERT_TRUE(pcm_pmbus_try_consume_autoclear(&tracker, PCM_PMBUS_STATUS_VIN_UV, 311LL * 1000000LL));
     TEST_ASSERT_EQUAL_UINT32(4, tracker.total_transient_clears);
 }
+
+TEST_CASE("PMBus hiccup recovery verification, rate limiting, and VRM protection step-down", "[power_control][pmbus]")
+{
+    // 1. Recovery verification predicates
+    // Valid hiccup: 0xC861 -> 0x8021 (OFF=0, PGOOD#=0), VOUT 1.15 V vs 1.155 V expected
+    TEST_ASSERT_TRUE(pcm_pmbus_is_hiccup_recovered(0xC861U, 0x8021U, 1.150f, 1.155f));
+    // Multi-domain (Hex 3.45 V)
+    TEST_ASSERT_TRUE(pcm_pmbus_is_hiccup_recovered(0xC861U, 0x8021U, 3.45f, 3.45f));
+    // Reject if initial status did not have OFF
+    TEST_ASSERT_FALSE(pcm_pmbus_is_hiccup_recovered(PCM_PMBUS_STATUS_VOUT_OV, 0x8021U, 1.150f, 1.155f));
+    // Reject if initial status includes TEMP fault
+    TEST_ASSERT_FALSE(pcm_pmbus_is_hiccup_recovered(0xC861U | PCM_PMBUS_STATUS_TEMP, 0x8021U, 1.150f, 1.155f));
+    // Reject if regulator still OFF or PGOOD# asserted after settle
+    TEST_ASSERT_FALSE(pcm_pmbus_is_hiccup_recovered(0xC861U, 0xC861U, 1.150f, 1.155f));
+    TEST_ASSERT_FALSE(pcm_pmbus_is_hiccup_recovered(0xC861U, 0x8821U, 1.150f, 1.155f));
+    // Reject if expected_vout_v == 0 (mining stopped) or measured VOUT out of tolerance/min
+    TEST_ASSERT_FALSE(pcm_pmbus_is_hiccup_recovered(0xC861U, 0x8021U, 1.150f, 0.0f));
+    TEST_ASSERT_FALSE(pcm_pmbus_is_hiccup_recovered(0xC861U, 0x8021U, 0.80f, 1.155f));
+    TEST_ASSERT_FALSE(pcm_pmbus_is_hiccup_recovered(0xC861U, 0x8021U, 1.45f, 1.155f));
+
+    // 2. Sliding-window rate limit (2 hiccups per 3600 s)
+    PcmPowerFaultTracker tracker;
+    pcm_power_fault_tracker_init(&tracker);
+
+    TEST_ASSERT_FALSE(pcm_pmbus_try_consume_hiccup_recovery(&tracker, 0xC861U | PCM_PMBUS_STATUS_TEMP, 100LL * 1000000LL));
+    TEST_ASSERT_TRUE(pcm_pmbus_try_consume_hiccup_recovery(&tracker, 0xC861U, 100LL * 1000000LL));
+    TEST_ASSERT_TRUE(pcm_pmbus_try_consume_hiccup_recovery(&tracker, 0xC861U, 1000LL * 1000000LL));
+    TEST_ASSERT_EQUAL_UINT32(2, tracker.total_hiccup_recoveries);
+    TEST_ASSERT_FALSE(pcm_pmbus_try_consume_hiccup_recovery(&tracker, 0xC861U, 2000LL * 1000000LL));
+    TEST_ASSERT_EQUAL_UINT32(2, tracker.total_hiccup_recoveries);
+    // After first entry expires (>3600 s later: 100 + 3601 = 3701 s)
+    TEST_ASSERT_TRUE(pcm_pmbus_try_consume_hiccup_recovery(&tracker, 0xC861U, 3701LL * 1000000LL));
+    TEST_ASSERT_EQUAL_UINT32(3, tracker.total_hiccup_recoveries);
+
+    // 3. VRM protection step-down: Performance 675 -> 650 -> 625 MHz with locked ceiling
+    float target_freq = 625.0f;
+    float dvfs_freq_off = 50.0f; // effective 675 MHz
+    int16_t dvfs_volt_off = 0;
+    float wd_freq_off = 0.0f;
+    float learned_max_freq = 0.0f;
+    uint16_t learned_min_vcore = 0;
+
+    TEST_ASSERT_TRUE(pcm_dvfs_apply_vrm_hiccup_stepdown(PCM_DVFS_PROFILE_PERFORMANCE,
+                                                        target_freq,
+                                                        &dvfs_freq_off,
+                                                        &wd_freq_off,
+                                                        &learned_max_freq));
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, 650.0f, learned_max_freq);
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, 650.0f,
+                             pcm_compute_effective_freq(PCM_DVFS_PROFILE_PERFORMANCE, target_freq, dvfs_freq_off, 0.0f, wd_freq_off));
+
+    TEST_ASSERT_TRUE(pcm_dvfs_apply_vrm_hiccup_stepdown(PCM_DVFS_PROFILE_PERFORMANCE,
+                                                        target_freq,
+                                                        &dvfs_freq_off,
+                                                        &wd_freq_off,
+                                                        &learned_max_freq));
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, 625.0f, learned_max_freq);
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, 625.0f,
+                             pcm_compute_effective_freq(PCM_DVFS_PROFILE_PERFORMANCE, target_freq, dvfs_freq_off, 0.0f, wd_freq_off));
+
+    // Performance step cannot climb back above locked learned_max_freq
+    float next_perf = pcm_dvfs_step_performance(target_freq, 1150, &dvfs_freq_off, &dvfs_volt_off,
+                                                &learned_max_freq, &learned_min_vcore,
+                                                0.0f, 60.0f, 70.0f, 24.0f);
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, 625.0f, next_perf);
+
+    // Manual mode steps down via watchdog_freq_offset_mhz down to 400 MHz floor
+    float man_dvfs_off = 0.0f;
+    float man_wd_off = 0.0f;
+    TEST_ASSERT_TRUE(pcm_dvfs_apply_vrm_hiccup_stepdown(PCM_DVFS_PROFILE_MANUAL, 415.0f, &man_dvfs_off, &man_wd_off, NULL));
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, 15.0f, man_wd_off);
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, 400.0f,
+                             pcm_compute_effective_freq(PCM_DVFS_PROFILE_MANUAL, 415.0f, man_dvfs_off, 0.0f, man_wd_off));
+    TEST_ASSERT_FALSE(pcm_dvfs_apply_vrm_hiccup_stepdown(PCM_DVFS_PROFILE_MANUAL, 415.0f, &man_dvfs_off, &man_wd_off, NULL));
+}

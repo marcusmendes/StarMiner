@@ -694,6 +694,99 @@ bool pcm_pmbus_try_consume_autoclear(PcmPowerFaultTracker * tracker,
     return true;
 }
 
+bool pcm_pmbus_is_hiccup_recovered(uint16_t initial_status,
+                                   uint16_t settle_status,
+                                   float settle_vout_v,
+                                   float expected_vout_v)
+{
+    if ((initial_status & PCM_PMBUS_STATUS_OFF) == 0U ||
+        (initial_status & PCM_PMBUS_STATUS_TEMP) != 0U) {
+        return false;
+    }
+    if ((settle_status & (PCM_PMBUS_STATUS_OFF | PCM_PMBUS_STATUS_PGOOD)) != 0U) {
+        return false;
+    }
+    if (isnan(settle_vout_v) || isnan(expected_vout_v) ||
+        expected_vout_v < 0.5f || settle_vout_v < PCM_PMBUS_HICCUP_VOUT_MIN_V) {
+        return false;
+    }
+
+    return fabsf(settle_vout_v - expected_vout_v) <= (expected_vout_v * PCM_PMBUS_HICCUP_VOUT_TOLERANCE);
+}
+
+bool pcm_pmbus_try_consume_hiccup_recovery(PcmPowerFaultTracker * tracker,
+                                           uint16_t initial_status,
+                                           int64_t now_us)
+{
+    if (tracker == NULL) {
+        return false;
+    }
+    if ((initial_status & PCM_PMBUS_STATUS_OFF) == 0U ||
+        (initial_status & PCM_PMBUS_STATUS_TEMP) != 0U) {
+        return false;
+    }
+
+    uint8_t kept = 0;
+    for (uint8_t i = 0; i < tracker->hiccup_count && i < PCM_PMBUS_MAX_HICCUPS_IN_WINDOW; i++) {
+        int64_t ts = tracker->hiccup_timestamps_us[i];
+        if (now_us < ts || (now_us - ts) < PCM_PMBUS_HICCUP_WINDOW_US) {
+            tracker->hiccup_timestamps_us[kept++] = ts;
+        }
+    }
+    tracker->hiccup_count = kept;
+
+    if (tracker->hiccup_count >= PCM_PMBUS_MAX_HICCUPS_IN_WINDOW) {
+        return false;
+    }
+
+    tracker->hiccup_timestamps_us[tracker->hiccup_count++] = now_us;
+    tracker->total_hiccup_recoveries++;
+    return true;
+}
+
+bool pcm_dvfs_apply_vrm_hiccup_stepdown(uint16_t profile,
+                                        float target_frequency_mhz,
+                                        float * dvfs_freq_offset_mhz,
+                                        float * watchdog_freq_offset_mhz,
+                                        float * learned_max_freq_mhz)
+{
+    float dvfs_freq_off = (dvfs_freq_offset_mhz != NULL) ? *dvfs_freq_offset_mhz : 0.0f;
+    float wd_freq_off = (watchdog_freq_offset_mhz != NULL) ? *watchdog_freq_offset_mhz : 0.0f;
+
+    float prev_eff_freq = pcm_compute_effective_freq(profile, target_frequency_mhz, dvfs_freq_off, 0.0f, wd_freq_off);
+    float desired_freq = fmaxf(PCM_FREQ_MIN_MHZ, prev_eff_freq - PCM_VRM_HICCUP_FREQ_STEP_MHZ);
+
+    if (profile == PCM_DVFS_PROFILE_BALANCED || profile == PCM_DVFS_PROFILE_PERFORMANCE) {
+        float min_freq = PCM_FREQ_MIN_MHZ;
+        float max_freq = PCM_DVFS_PERFORMANCE_MAX_FREQ_MHZ;
+        pcm_get_dvfs_freq_bounds(profile, &min_freq, &max_freq);
+
+        float next_base = fmaxf(min_freq, desired_freq);
+        dvfs_freq_off = next_base - target_frequency_mhz;
+        lock_learned_max_freq(learned_max_freq_mhz, next_base);
+
+        if (desired_freq < next_base) {
+            float max_wd = fmaxf(0.0f, next_base - PCM_FREQ_MIN_MHZ);
+            float shortfall = next_base - desired_freq;
+            wd_freq_off = fminf(max_wd, wd_freq_off + shortfall);
+        }
+    } else {
+        float cur_base = pcm_compute_dvfs_base_freq(profile, target_frequency_mhz, dvfs_freq_off);
+        float max_wd = fmaxf(0.0f, cur_base - PCM_FREQ_MIN_MHZ);
+        wd_freq_off = fminf(max_wd, wd_freq_off + PCM_VRM_HICCUP_FREQ_STEP_MHZ);
+    }
+
+    if (dvfs_freq_offset_mhz != NULL) {
+        *dvfs_freq_offset_mhz = dvfs_freq_off;
+    }
+    if (watchdog_freq_offset_mhz != NULL) {
+        *watchdog_freq_offset_mhz = wd_freq_off;
+    }
+
+    float next_eff_freq = pcm_compute_effective_freq(profile, target_frequency_mhz, dvfs_freq_off, 0.0f, wd_freq_off);
+    return next_eff_freq < (prev_eff_freq - 0.001f);
+}
+
 void pcm_pmbus_format_fault_message(uint16_t status_word,
                                     bool repeated,
                                     char * out_buf,

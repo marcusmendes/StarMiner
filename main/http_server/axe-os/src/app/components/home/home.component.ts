@@ -32,6 +32,7 @@ type MessageType =
   | 'MINING_PAUSED'
   | 'DEVICE_OVERHEAT'
   | 'THERMAL_THROTTLE'
+  | 'VRM_HICCUP'
   | 'POWER_FAULT'
   | 'FREQUENCY_LOW'
   | 'FALLBACK_STRATUM'
@@ -1018,6 +1019,22 @@ export class HomeComponent implements OnInit, OnDestroy {
       });
   }
 
+  public clearPowerFault(): void {
+    this.systemService.clearPowerFault()
+      .pipe(
+        this.loadingService.lockUIUntilComplete()
+      )
+      .subscribe({
+        next: (res) => {
+          this.toastr.success(res?.message || 'Power fault cleared');
+        },
+        error: (err: HttpErrorResponse) => {
+          const msg = err?.error?.message || err.message || 'Unable to clear power fault';
+          this.toastr.error(`Clear Power Fault failed: ${msg}`);
+        }
+      });
+  }
+
   private setTitle(info: ISystemInfo, systemInfoError: ISystemInfoError) {
     const parts = [this.pageDefaultTitle];
 
@@ -1131,6 +1148,14 @@ export class HomeComponent implements OnInit, OnDestroy {
       `Thermal throttling active (${effectiveFreq} / ${targetFrequency} MHz, ${info.coreVoltage} V)`
     );
     updateMessage(!!info.power_fault, 'POWER_FAULT', 'error', `${info.power_fault} Check your Power Supply.`);
+    const hiccupCount = info.vrmHiccupCount ?? 0;
+    const hiccupHex = (info.lastVrmHiccupStatus ?? 0).toString(16).toUpperCase().padStart(4, '0');
+    updateMessage(
+      !info.power_fault && hiccupCount > 0,
+      'VRM_HICCUP',
+      'warn',
+      `VRM transient hiccup recovered (${hiccupCount}x, last 0x${hiccupHex}). Frequency stepped down for VRM protection.`
+    );
     updateMessage(!!info.hardware_fault, 'HARDWARE_FAULT', 'error', `${info.hardware_fault}`);
     updateMessage(!targetFrequency || targetFrequency < 400, 'FREQUENCY_LOW', 'warn', 'Device frequency is set low - See settings');
     updateMessage(!!info.isUsingFallbackStratum, 'FALLBACK_STRATUM', 'warn', 'Using fallback pool - Share stats reset. Check Pool Settings and / or reboot Device.');

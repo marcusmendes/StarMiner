@@ -949,6 +949,70 @@ static void handle_thermal_state_machine(GlobalState * GLOBAL_STATE, bool * prev
     }
 }
 
+static void handle_vrm_hiccup_protection(GlobalState * GLOBAL_STATE)
+{
+    PowerManagementModule * power_management = &GLOBAL_STATE->POWER_MANAGEMENT_MODULE;
+    SystemModule * sys_module = &GLOBAL_STATE->SYSTEM_MODULE;
+
+    if (!power_management->vrm_hiccup_stepdown_pending) {
+        return;
+    }
+    power_management->vrm_hiccup_stepdown_pending = false;
+
+    if (!GLOBAL_STATE->ASIC_initalized || sys_module->overheat_mode ||
+        sys_module->hardware_fault || sys_module->mining_paused ||
+        GLOBAL_STATE->SELF_TEST_MODULE.is_active) {
+        return;
+    }
+
+    if (power_management->dvfs_profile == DVFS_PROFILE_ADAPTIVE) {
+        DvfsBanditState * bandit = ensure_bandit_state_allocated();
+        if (bandit != NULL) {
+            float prev_eff_freq = get_effective_frequency_mhz(power_management);
+            float rb_freq = get_dvfs_base_target_freq(power_management);
+            uint16_t rb_vcore = get_dvfs_base_target_voltage_mv(power_management);
+            dvfs_bandit_record_fault_and_rollback(bandit, true, &rb_freq, &rb_vcore);
+            power_management->dvfs_freq_offset_mhz = rb_freq - power_management->target_frequency;
+            power_management->dvfs_voltage_offset_mv = (int16_t) ((int32_t) rb_vcore - (int32_t) power_management->target_voltage);
+            power_management->adaptive_best_freq_mhz = bandit->best_safe_freq_mhz;
+            power_management->adaptive_best_vcore_mv = bandit->best_safe_vcore_mv;
+
+            float desired_freq = fmaxf(FREQ_MIN_MHZ, prev_eff_freq - PCM_VRM_HICCUP_FREQ_STEP_MHZ);
+            float cur_eff_freq = get_effective_frequency_mhz(power_management);
+            if (cur_eff_freq > (desired_freq + 0.001f)) {
+                float cur_base = get_dvfs_base_target_freq(power_management);
+                float max_wd = fmaxf(0.0f, cur_base - FREQ_MIN_MHZ);
+                power_management->watchdog_freq_offset_mhz = fminf(
+                    max_wd, power_management->watchdog_freq_offset_mhz + (cur_eff_freq - desired_freq));
+            }
+        } else {
+            pcm_dvfs_apply_vrm_hiccup_stepdown(power_management->dvfs_profile,
+                                               power_management->target_frequency,
+                                               &power_management->dvfs_freq_offset_mhz,
+                                               &power_management->watchdog_freq_offset_mhz,
+                                               &power_management->learned_max_freq_mhz);
+        }
+    } else {
+        pcm_dvfs_apply_vrm_hiccup_stepdown(power_management->dvfs_profile,
+                                           power_management->target_frequency,
+                                           &power_management->dvfs_freq_offset_mhz,
+                                           &power_management->watchdog_freq_offset_mhz,
+                                           &power_management->learned_max_freq_mhz);
+    }
+
+    power_management->last_dvfs_step_us = esp_timer_get_time();
+    apply_effective_power_and_freq(GLOBAL_STATE);
+    sync_rtc_diagnostics(power_management);
+
+    float effective_freq = get_effective_frequency_mhz(power_management);
+    ESP_LOGW(TAG,
+             "VRM hiccup protection step-down #%lu (STATUS_WORD=0x%04X): -> %.1f MHz (learned ceiling: %.1f MHz)",
+             (unsigned long) power_management->vrm_hiccup_count,
+             (unsigned int) power_management->last_vrm_hiccup_status,
+             effective_freq,
+             power_management->learned_max_freq_mhz);
+}
+
 void POWER_MANAGEMENT_task(void * pvParameters)
 {
     ESP_LOGI(TAG, "Starting");
@@ -969,6 +1033,9 @@ void POWER_MANAGEMENT_task(void * pvParameters)
     power_management->pre_watchdog_cusum_max = 0.0f;
     power_management->pre_watchdog_recoveries = 0;
     power_management->last_pre_watchdog_action_us = 0;
+    power_management->vrm_hiccup_count = 0;
+    power_management->last_vrm_hiccup_status = 0;
+    power_management->vrm_hiccup_stepdown_pending = false;
     reset_watchdog_state(power_management);
     reset_thermal_throttle_state(power_management);
     reset_vdroop_state(power_management);
@@ -1135,6 +1202,7 @@ void POWER_MANAGEMENT_task(void * pvParameters)
         }
 
         VCORE_check_fault(GLOBAL_STATE);
+        handle_vrm_hiccup_protection(GLOBAL_STATE);
         if (power_management->cml_error_count != s_rtc_diag.cml_error_count) {
             sync_rtc_diagnostics(power_management);
         }

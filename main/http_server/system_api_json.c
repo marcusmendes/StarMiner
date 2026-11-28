@@ -96,6 +96,8 @@ static void system_api_add_telemetry(cJSON *root, GlobalState *g) {
     cJSON_AddNumberToObject(root, "throttleActive", g->POWER_MANAGEMENT_MODULE.throttle_active ? 1 : 0);
     cJSON_AddNumberToObject(root, "vdroopOffsetMv", g->POWER_MANAGEMENT_MODULE.vdroop_offset_mv);
     cJSON_AddNumberToObject(root, "cmlErrorCount", g->POWER_MANAGEMENT_MODULE.cml_error_count);
+    cJSON_AddNumberToObject(root, "vrmHiccupCount", g->POWER_MANAGEMENT_MODULE.vrm_hiccup_count);
+    cJSON_AddNumberToObject(root, "lastVrmHiccupStatus", g->POWER_MANAGEMENT_MODULE.last_vrm_hiccup_status);
     cJSON_AddNumberToObject(root, "watchdogResets", g->POWER_MANAGEMENT_MODULE.watchdog_resets);
     cJSON_AddNumberToObject(root, "lastWatchdogReason", g->POWER_MANAGEMENT_MODULE.last_watchdog_reason);
     cJSON_AddFloatToObject(root, "learnedMaxFreq", g->POWER_MANAGEMENT_MODULE.learned_max_freq_mhz);

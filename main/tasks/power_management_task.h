@@ -53,6 +53,9 @@ typedef struct
     float pre_watchdog_cusum_max;
     uint32_t pre_watchdog_recoveries;
     int64_t last_pre_watchdog_action_us;
+    uint32_t vrm_hiccup_count;
+    uint16_t last_vrm_hiccup_status;
+    volatile bool vrm_hiccup_stepdown_pending;
 } PowerManagementModule;
 
 void POWER_MANAGEMENT_init_frequency(void * pvParameters);

@@ -2,6 +2,9 @@
 #include <stdint.h>
 #include <math.h>
 #include <string.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+#include "freertos/task.h"
 #include "esp_log.h"
 #include "esp_err.h"
 #include "esp_check.h"
@@ -37,7 +40,10 @@ static i2c_master_dev_handle_t tps546_i2c_handle;
 
 static TPS546_CONFIG tps546_config;
 static PcmPowerFaultTracker s_fault_tracker;
+static SemaphoreHandle_t s_tps_fault_mutex = NULL;
 static char tps_error_message[256] = "Power Fault Detected.";
+
+#define TPS546_HICCUP_SETTLE_MS 150
 
 // Cached values to handle I2C failures robustly
 static float last_vin = 0.0f;
@@ -354,6 +360,9 @@ esp_err_t TPS546_init(TPS546_CONFIG config)
     tps546_config = config;
     s_vout_mode_cached = false;
     s_last_vout_read_us = 0;
+    if (s_tps_fault_mutex == NULL) {
+        s_tps_fault_mutex = xSemaphoreCreateMutex();
+    }
     pcm_power_fault_tracker_init(&s_fault_tracker);
     snprintf(tps_error_message, sizeof(tps_error_message), "Power Fault Detected.");
 
@@ -805,7 +814,19 @@ esp_err_t TPS546_check_status(GlobalState * GLOBAL_STATE) {
     SystemModule * SYSTEM_MODULE = &GLOBAL_STATE->SYSTEM_MODULE;
     uint16_t status;
 
-    ESP_RETURN_ON_ERROR(smb_read_word(PMBUS_STATUS_WORD, &status), TAG, "Failed to read STATUS_WORD");
+    if (s_tps_fault_mutex != NULL && xSemaphoreTake(s_tps_fault_mutex, pdMS_TO_TICKS(500)) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;
+    }
+
+    esp_err_t err = smb_read_word(PMBUS_STATUS_WORD, &status);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to read STATUS_WORD (%s)", esp_err_to_name(err));
+        if (s_tps_fault_mutex != NULL) {
+            xSemaphoreGive(s_tps_fault_mutex);
+        }
+        return err;
+    }
+
     //determine if this is a fault we care about
     if (status & PCM_PMBUS_FAULT_MASK) {
         if (SYSTEM_MODULE->power_fault == 0) {
@@ -813,35 +834,90 @@ esp_err_t TPS546_check_status(GlobalState * GLOBAL_STATE) {
                 ESP_LOGW(TAG, "Partial PMBus status parse failure for STATUS_WORD=0x%04X", status);
             }
 
-            if (pcm_pmbus_try_consume_autoclear(&s_fault_tracker, status, esp_timer_get_time())) {
-                pcm_pmbus_format_fault_message(status, false, tps_error_message, sizeof(tps_error_message));
-                ESP_LOGW(TAG, "%s Regulator ON — attempting CLEAR_FAULTS re-check (%u/%u in 5m)",
-                         tps_error_message,
-                         (unsigned int)s_fault_tracker.clear_count,
-                         (unsigned int)PCM_PMBUS_MAX_AUTOCLEARS_IN_WINDOW);
+            if ((status & PCM_PMBUS_STATUS_OFF) == 0U) {
+                if (pcm_pmbus_try_consume_autoclear(&s_fault_tracker, status, esp_timer_get_time())) {
+                    pcm_pmbus_format_fault_message(status, false, tps_error_message, sizeof(tps_error_message));
+                    ESP_LOGW(TAG, "%s Regulator ON — attempting CLEAR_FAULTS re-check (%u/%u in 5m)",
+                             tps_error_message,
+                             (unsigned int)s_fault_tracker.clear_count,
+                             (unsigned int)PCM_PMBUS_MAX_AUTOCLEARS_IN_WINDOW);
 
-                TPS546_clear_faults();
-                vTaskDelay(pdMS_TO_TICKS(10));
+                    TPS546_clear_faults();
+                    vTaskDelay(pdMS_TO_TICKS(10));
 
-                uint16_t recheck = 0;
-                esp_err_t recheck_err = smb_read_word(PMBUS_STATUS_WORD, &recheck);
-                if (recheck_err == ESP_OK && (recheck & PCM_PMBUS_FAULT_MASK) == 0) {
-                    ESP_LOGW(TAG, "TPS546 transient fault 0x%04X cleared cleanly (post-clear=0x%04X, total=%lu)",
-                             status, recheck, (unsigned long)s_fault_tracker.total_transient_clears);
-                    snprintf(tps_error_message, sizeof(tps_error_message), "Power Fault Detected.");
-                    SYSTEM_MODULE->power_fault = 0;
-                    return ESP_OK;
+                    uint16_t recheck = 0;
+                    esp_err_t recheck_err = smb_read_word(PMBUS_STATUS_WORD, &recheck);
+                    if (recheck_err == ESP_OK && (recheck & PCM_PMBUS_FAULT_MASK) == 0) {
+                        ESP_LOGW(TAG, "TPS546 transient fault 0x%04X cleared cleanly (post-clear=0x%04X, total=%lu)",
+                                 status, recheck, (unsigned long)s_fault_tracker.total_transient_clears);
+                        snprintf(tps_error_message, sizeof(tps_error_message), "Power Fault Detected.");
+                        SYSTEM_MODULE->power_fault = 0;
+                        if (s_tps_fault_mutex != NULL) {
+                            xSemaphoreGive(s_tps_fault_mutex);
+                        }
+                        return ESP_OK;
+                    }
+
+                    uint16_t active_status = (recheck_err == ESP_OK) ? recheck : status;
+                    pcm_pmbus_format_fault_message(active_status, false, tps_error_message, sizeof(tps_error_message));
+                    ESP_LOGE(TAG, "TPS546 fault persists after CLEAR_FAULTS: %s", tps_error_message);
+                    SYSTEM_MODULE->power_fault = 1;
+                } else {
+                    pcm_pmbus_format_fault_message(status, true, tps_error_message, sizeof(tps_error_message));
+                    ESP_LOGE(TAG, "Latching TPS546 fault: %s", tps_error_message);
+                    SYSTEM_MODULE->power_fault = 1;
                 }
-
-                uint16_t active_status = (recheck_err == ESP_OK) ? recheck : status;
-                pcm_pmbus_format_fault_message(active_status, false, tps_error_message, sizeof(tps_error_message));
-                ESP_LOGE(TAG, "TPS546 fault persists after CLEAR_FAULTS: %s", tps_error_message);
-                SYSTEM_MODULE->power_fault = 1;
             } else {
-                bool repeated = !(status & PCM_PMBUS_STATUS_OFF);
-                pcm_pmbus_format_fault_message(status, repeated, tps_error_message, sizeof(tps_error_message));
-                ESP_LOGE(TAG, "Latching TPS546 fault: %s", tps_error_message);
-                SYSTEM_MODULE->power_fault = 1;
+                uint16_t actual_mv = GLOBAL_STATE->POWER_MANAGEMENT_MODULE.actual_voltage_mv;
+                uint16_t domains = GLOBAL_STATE->DEVICE_CONFIG.family.voltage_domains;
+                float expected_vout_v = (actual_mv > 0)
+                    ? (((float)actual_mv / 1000.0f) * (float)(domains > 0 ? domains : 1))
+                    : 0.0f;
+
+                vTaskDelay(pdMS_TO_TICKS(TPS546_HICCUP_SETTLE_MS));
+
+                uint16_t settle_status = 0;
+                esp_err_t settle_err = smb_read_word(PMBUS_STATUS_WORD, &settle_status);
+                s_last_vout_read_us = 0;
+                float settle_vout_v = TPS546_get_vout();
+
+                if (settle_err == ESP_OK &&
+                    pcm_pmbus_is_hiccup_recovered(status, settle_status, settle_vout_v, expected_vout_v)) {
+                    if (pcm_pmbus_try_consume_hiccup_recovery(&s_fault_tracker, status, esp_timer_get_time())) {
+                        TPS546_clear_faults();
+                        vTaskDelay(pdMS_TO_TICKS(10));
+
+                        uint16_t recheck = 0;
+                        esp_err_t recheck_err = smb_read_word(PMBUS_STATUS_WORD, &recheck);
+                        if (recheck_err == ESP_OK && (recheck & PCM_PMBUS_FAULT_MASK) == 0) {
+                            ESP_LOGW(TAG, "TPS546 VRM hiccup recovered (initial=0x%04X, settle=0x%04X, vout=%.3fV, post-clear=0x%04X, total=%lu) - requesting VRM protection step-down",
+                                     status, settle_status, settle_vout_v, recheck,
+                                     (unsigned long)s_fault_tracker.total_hiccup_recoveries);
+                            snprintf(tps_error_message, sizeof(tps_error_message), "Power Fault Detected.");
+                            SYSTEM_MODULE->power_fault = 0;
+                            GLOBAL_STATE->POWER_MANAGEMENT_MODULE.vrm_hiccup_count++;
+                            GLOBAL_STATE->POWER_MANAGEMENT_MODULE.last_vrm_hiccup_status = status;
+                            GLOBAL_STATE->POWER_MANAGEMENT_MODULE.vrm_hiccup_stepdown_pending = true;
+                            if (s_tps_fault_mutex != NULL) {
+                                xSemaphoreGive(s_tps_fault_mutex);
+                            }
+                            return ESP_OK;
+                        }
+
+                        uint16_t active_status = (recheck_err == ESP_OK) ? recheck : status;
+                        pcm_pmbus_format_fault_message(active_status, false, tps_error_message, sizeof(tps_error_message));
+                        ESP_LOGE(TAG, "TPS546 hiccup fault persists after CLEAR_FAULTS: %s", tps_error_message);
+                        SYSTEM_MODULE->power_fault = 1;
+                    } else {
+                        pcm_pmbus_format_fault_message(status, true, tps_error_message, sizeof(tps_error_message));
+                        ESP_LOGE(TAG, "Latching repeated TPS546 hiccup fault: %s", tps_error_message);
+                        SYSTEM_MODULE->power_fault = 1;
+                    }
+                } else {
+                    pcm_pmbus_format_fault_message(status, false, tps_error_message, sizeof(tps_error_message));
+                    ESP_LOGE(TAG, "Latching TPS546 fault: %s", tps_error_message);
+                    SYSTEM_MODULE->power_fault = 1;
+                }
             }
         }
     } else {
@@ -862,7 +938,48 @@ esp_err_t TPS546_check_status(GlobalState * GLOBAL_STATE) {
             }
         }
     }
+    if (s_tps_fault_mutex != NULL) {
+        xSemaphoreGive(s_tps_fault_mutex);
+    }
     return ESP_OK;
+}
+
+esp_err_t TPS546_manual_clear_fault(GlobalState * GLOBAL_STATE) {
+    if (GLOBAL_STATE == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (s_tps_fault_mutex != NULL && xSemaphoreTake(s_tps_fault_mutex, pdMS_TO_TICKS(500)) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;
+    }
+
+    esp_err_t clear_err = TPS546_clear_faults();
+    vTaskDelay(pdMS_TO_TICKS(15));
+
+    uint16_t status = 0;
+    esp_err_t read_err = smb_read_word(PMBUS_STATUS_WORD, &status);
+
+    esp_err_t result;
+    if (clear_err == ESP_OK && read_err == ESP_OK && (status & PCM_PMBUS_FAULT_MASK) == 0U) {
+        pcm_power_fault_tracker_init(&s_fault_tracker);
+        snprintf(tps_error_message, sizeof(tps_error_message), "Power Fault Detected.");
+        GLOBAL_STATE->SYSTEM_MODULE.power_fault = 0;
+        ESP_LOGI(TAG, "TPS546 fault manually cleared cleanly (STATUS_WORD=0x%04X)", status);
+        result = ESP_OK;
+    } else {
+        if (read_err == ESP_OK) {
+            pcm_pmbus_format_fault_message(status, false, tps_error_message, sizeof(tps_error_message));
+        }
+        GLOBAL_STATE->SYSTEM_MODULE.power_fault = 1;
+        ESP_LOGW(TAG, "TPS546 manual clear failed or fault active (clear_err=%s, read_err=%s, STATUS_WORD=0x%04X)",
+                 esp_err_to_name(clear_err), esp_err_to_name(read_err), status);
+        result = ESP_ERR_INVALID_STATE;
+    }
+
+    if (s_tps_fault_mutex != NULL) {
+        xSemaphoreGive(s_tps_fault_mutex);
+    }
+    return result;
 }
 
 // Get the current TPS error message

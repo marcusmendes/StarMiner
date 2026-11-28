@@ -620,6 +620,12 @@ components:
         cmlErrorCount:
           type: integer
           description: Number of recovered TPS546 STATUS_CML communication faults
+        vrmHiccupCount:
+          type: integer
+          description: Number of recovered TPS546 VRM hiccup events in current session
+        lastVrmHiccupStatus:
+          type: integer
+          description: PMBus STATUS_WORD bitmask of the last recovered VRM hiccup event
         watchdogResets:
           type: integer
           description: Number of ASIC/domain watchdog recoveries in current session
@@ -1244,6 +1250,45 @@ paths:
                     type: string
         '401':
           description: Unauthorized - Client not in allowed network range
+        '500':
+          description: Internal server error
+
+  /api/system/powerFault/clear:
+    post:
+      summary: Clear active TPS546 power fault
+      description: Issues PMBus CLEAR_FAULTS and clears the latched power_fault state if no fault persists
+      operationId: clearPowerFault
+      tags:
+        - system
+      responses:
+        '200':
+          description: Power fault cleared
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  cleared:
+                    type: boolean
+                  power_fault:
+                    type: string
+                  message:
+                    type: string
+        '401':
+          description: Unauthorized - Client not in allowed network range
+        '409':
+          description: Hardware power fault remains active after CLEAR_FAULTS
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  cleared:
+                    type: boolean
+                  power_fault:
+                    type: string
+                  message:
+                    type: string
         '500':
           description: Internal server error
 

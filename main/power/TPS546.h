@@ -204,6 +204,7 @@ void TPS546_print_status(void);
 
 esp_err_t TPS546_check_status(GlobalState * GLOBAL_STATE);
 esp_err_t TPS546_clear_faults(void);
+esp_err_t TPS546_manual_clear_fault(GlobalState * GLOBAL_STATE);
 
 const char* TPS546_get_error_message(void); //Get the current TPS error message
 void TPS546_log_snapshot(const TPS546_StatusSnapshot *s);

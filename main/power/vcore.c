@@ -172,6 +172,15 @@ esp_err_t VCORE_check_fault(GlobalState * GLOBAL_STATE)
     return ESP_OK;
 }
 
+esp_err_t VCORE_clear_fault(GlobalState * GLOBAL_STATE)
+{
+    if (GLOBAL_STATE->DEVICE_CONFIG.TPS546) {
+        return TPS546_manual_clear_fault(GLOBAL_STATE);
+    }
+    GLOBAL_STATE->SYSTEM_MODULE.power_fault = 0;
+    return ESP_OK;
+}
+
 const char * VCORE_get_fault_string(GlobalState * GLOBAL_STATE)
 {
     if (GLOBAL_STATE->DEVICE_CONFIG.TPS546) {

@@ -300,6 +300,7 @@ PcmPreWatchdogAction pcm_pre_watchdog_apply_relief(uint16_t profile,
                                                    float * learned_max_freq_mhz,
                                                    uint16_t * learned_min_vcore_mv);
 
+#define PCM_PMBUS_STATUS_PGOOD              0x0800U
 #define PCM_PMBUS_STATUS_OFF                0x0040U
 #define PCM_PMBUS_STATUS_VOUT_OV            0x0020U
 #define PCM_PMBUS_STATUS_IOUT_OC            0x0010U
@@ -310,11 +311,19 @@ PcmPreWatchdogAction pcm_pre_watchdog_apply_relief(uint16_t profile,
                                              PCM_PMBUS_STATUS_TEMP)
 #define PCM_PMBUS_MAX_AUTOCLEARS_IN_WINDOW  3U
 #define PCM_PMBUS_AUTOCLEAR_WINDOW_US       (300LL * 1000000LL)
+#define PCM_PMBUS_MAX_HICCUPS_IN_WINDOW     2U
+#define PCM_PMBUS_HICCUP_WINDOW_US          (3600LL * 1000000LL)
+#define PCM_PMBUS_HICCUP_VOUT_TOLERANCE     0.15f
+#define PCM_PMBUS_HICCUP_VOUT_MIN_V         0.85f
+#define PCM_VRM_HICCUP_FREQ_STEP_MHZ        25.0f
 
 typedef struct {
     int64_t clear_timestamps_us[PCM_PMBUS_MAX_AUTOCLEARS_IN_WINDOW];
     uint8_t clear_count;
     uint32_t total_transient_clears;
+    int64_t hiccup_timestamps_us[PCM_PMBUS_MAX_HICCUPS_IN_WINDOW];
+    uint8_t hiccup_count;
+    uint32_t total_hiccup_recoveries;
 } PcmPowerFaultTracker;
 
 void pcm_power_fault_tracker_init(PcmPowerFaultTracker * tracker);
@@ -322,6 +331,21 @@ void pcm_power_fault_tracker_init(PcmPowerFaultTracker * tracker);
 bool pcm_pmbus_try_consume_autoclear(PcmPowerFaultTracker * tracker,
                                      uint16_t status_word,
                                      int64_t now_us);
+
+bool pcm_pmbus_is_hiccup_recovered(uint16_t initial_status,
+                                   uint16_t settle_status,
+                                   float settle_vout_v,
+                                   float expected_vout_v);
+
+bool pcm_pmbus_try_consume_hiccup_recovery(PcmPowerFaultTracker * tracker,
+                                           uint16_t initial_status,
+                                           int64_t now_us);
+
+bool pcm_dvfs_apply_vrm_hiccup_stepdown(uint16_t profile,
+                                        float target_frequency_mhz,
+                                        float * dvfs_freq_offset_mhz,
+                                        float * watchdog_freq_offset_mhz,
+                                        float * learned_max_freq_mhz);
 
 void pcm_pmbus_format_fault_message(uint16_t status_word,
                                     bool repeated,
